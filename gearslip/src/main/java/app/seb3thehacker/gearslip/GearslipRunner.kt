@@ -771,7 +771,7 @@ class GearslipRunner(
                 )
                 // VideoFocusRequestNotification { mode = 2; reason = 3 }
                 val focus = Protobuf.varintField(2, VIDEO_FOCUS_PROJECTED.toLong()) +
-                    Protobuf.varintField(3, 1L)
+                    Protobuf.varintField(3, 0L) // reason UNKNOWN, as Android Auto sends it
                 if (TruckTests.focusMode == "skip") {
                     log.i("focus=skip: not requesting video focus; sending Start and waiting for the car to grant it")
                     onVideoFocus(VIDEO_FOCUS_PROJECTED)
@@ -883,7 +883,11 @@ class GearslipRunner(
                 }
                 log.hex("   csd", csd, limit = 64)
             },
-            onFrame = { data, presentationTimeUs, keyFrame ->
+            onFrame = { rawData, presentationTimeUs, keyFrame ->
+                // Android Auto trims trailing zero padding from every encoder buffer before sending.
+                var end = rawData.size
+                while (end > 3 && rawData[end - 1] == 0.toByte()) end--
+                val data = if (end == rawData.size) rawData else rawData.copyOf(end)
                 synchronized(steadyLock) { sendVideoFrame(data, presentationTimeUs, keyFrame) }
             },
         ).also { source ->
