@@ -147,7 +147,7 @@ class AudioCaptureService : Service() {
 
         reading = true
         thread = Thread({
-            val buffer = ByteArray(CHUNK_BYTES)
+            val buffer = ByteArray(app.seb3thehacker.gearslip.TruckTests.audioChunk.toIntOrNull() ?: CHUNK_BYTES)
             var peak = 0
             var heardAt = System.currentTimeMillis()
             val startedAt = heardAt

@@ -119,7 +119,8 @@ class AudioLink(
             }
 
             MSG_ACK -> {
-                val acked = Wire.varint(Wire.fields(body), 2)?.toInt() ?: 1
+                val acked = (Wire.varint(Wire.fields(body), 2)?.toInt() ?: 1) *
+                    (app.seb3thehacker.gearslip.TruckTests.audioAckCredit.toIntOrNull() ?: 1)
                 synchronized(ackLock) {
                     inFlight = maxOf(0, inFlight - maxOf(1, acked))
                     lastAckAt = System.currentTimeMillis()

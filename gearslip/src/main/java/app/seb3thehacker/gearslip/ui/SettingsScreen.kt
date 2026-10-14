@@ -203,6 +203,12 @@ private fun TruckTestSection() {
         CycleRow("Steady frames", app.seb3thehacker.gearslip.TruckTests.KEY_STEADY,
             listOf("off" to "Off", "on" to "On (repeat last keyframe when screen is still)"))
         SettingsDivider()
+        CycleRow("Audio chunks per ack", app.seb3thehacker.gearslip.TruckTests.KEY_AUDIO_CREDIT,
+            listOf("1" to "1 (normal)", "2" to "2 (car acks every other chunk)"))
+        SettingsDivider()
+        CycleRow("Audio chunk size", app.seb3thehacker.gearslip.TruckTests.KEY_AUDIO_CHUNK,
+            listOf("4096" to "4096 bytes (normal)", "2048" to "2048 bytes"))
+        SettingsDivider()
         CycleRow("Verbose debug logs", app.seb3thehacker.gearslip.TruckTests.KEY_VERBOSE,
             listOf("off" to "Off", "on" to "On (logs every message, large log)"))
     }
