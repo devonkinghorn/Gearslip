@@ -190,7 +190,37 @@ private fun TruckTestSection() {
             icon = Icons.Filled.Settings,
             trailing = { Arrow() },
         )
+        SettingsDivider()
+        CycleRow("Ack handling", app.seb3thehacker.gearslip.TruckTests.KEY_ACK,
+            listOf("auto" to "Auto (stop waiting if the car never acks)", "wait" to "Always wait for acks", "nowait" to "Never wait (steady stream)"))
+        SettingsDivider()
+        CycleRow("Video timestamps", app.seb3thehacker.gearslip.TruckTests.KEY_PTS,
+            listOf("encoder" to "Encoder time", "wall" to "Clock time", "zero" to "Zero"))
+        SettingsDivider()
+        CycleRow("SPS/PPS delivery", app.seb3thehacker.gearslip.TruckTests.KEY_CSD,
+            listOf("separate" to "Separate CodecConfig message", "prepend" to "On every keyframe", "both" to "Both"))
+        SettingsDivider()
+        CycleRow("Verbose debug logs", app.seb3thehacker.gearslip.TruckTests.KEY_VERBOSE,
+            listOf("off" to "Off", "on" to "On (logs every message, large log)"))
     }
+}
+
+@Composable
+private fun CycleRow(title: String, key: String, options: List<Pair<String, String>>) {
+    val context = LocalContext.current
+    var value by remember { mutableStateOf(app.seb3thehacker.gearslip.AppSettings.getString(context, key, options.first().first)) }
+    val label = options.firstOrNull { it.first == value }?.second ?: options.first().second
+    SettingsRow(
+        title,
+        Modifier.clickable {
+            val i = options.indexOfFirst { it.first == value }
+            value = options[(i + 1) % options.size].first
+            app.seb3thehacker.gearslip.AppSettings.putString(context, key, value)
+        },
+        subtitle = "$label — tap to cycle",
+        icon = Icons.Filled.Settings,
+        trailing = { Arrow() },
+    )
 }
 
 @Composable

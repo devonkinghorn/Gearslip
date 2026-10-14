@@ -307,6 +307,7 @@ class GearslipActivity : ComponentActivity(), Projection {
             "low" -> 2_000_000
             else -> null
         }
+        TruckTests.load(this)
         GearslipLog.i("truck-test settings: resolution=${res ?: "auto"} bitrate=${bitrate?.let { "${it / 1000}kbps" } ?: "normal"}")
         val runner = GearslipRunner(
             input = FileInputStream(pfd.fileDescriptor),

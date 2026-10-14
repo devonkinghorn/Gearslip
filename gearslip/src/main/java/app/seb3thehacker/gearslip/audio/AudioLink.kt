@@ -193,11 +193,12 @@ class AudioLink(
         // Wait for the car to catch up rather than throw the chunk away: a dropped chunk is a gap
         // the driver hears, while a short wait is soaked up by the capture buffer behind us.
         synchronized(ackLock) {
-            while (started && inFlight >= maxUnacked) {
+            while (started && app.seb3thehacker.gearslip.TruckTests.waitAudioAcks() && inFlight >= maxUnacked) {
                 val waited = System.currentTimeMillis() - lastAckAt
                 if (waited > STALL_MS) {
                     // A lost ack must not silence the stream for good; after a stall assume the window cleared.
                     GearslipLog.w("audio: no ack for ${STALL_MS}ms with $inFlight in flight - reopening the window")
+                    app.seb3thehacker.gearslip.TruckTests.onAudioStall()
                     inFlight = 0
                     break
                 }

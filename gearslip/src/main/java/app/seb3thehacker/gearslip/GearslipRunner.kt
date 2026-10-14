@@ -176,6 +176,11 @@ class GearslipRunner(
 
         lastProgress = System.currentTimeMillis()
 
+        if (TruckTests.verbose) {
+            log.i("<< ch=${frame.channel} id=$messageId len=${body.size} enc=${frame.encrypted}")
+            log.hex("   in", body, limit = 48)
+        }
+
         if (frame.channel != Frames.CHANNEL_CONTROL) {
             if (frame.channel == videoChannelId) {
                 onVideoMessage(messageId, body)
@@ -794,8 +799,9 @@ class GearslipRunner(
                     lastAckAt = System.currentTimeMillis()
                     ackLock.notifyAll()
                 }
-                if (framesSent <= 3 || framesSent % 60 == 0) {
-                    log.i("<- MediaAck(ack=$acked) inFlight=$inFlight after $framesSent frames")
+                if (TruckTests.verbose || framesSent <= 3 || framesSent % 60 == 0) {
+                    log.i("<- MediaAck(ack=$acked) inFlight=$inFlight after $framesSent frames fields=${fields.map { "#${it.number}/${it.wireType}" }}")
+                    log.hex("   ack raw", body, limit = 32)
                 }
             }
 
@@ -862,8 +868,12 @@ class GearslipRunner(
             bitRateOverride = bitRateOverride,
             onCodecConfig = { csd ->
                 lastCodecConfig = csd
-                send(MSG_MEDIA_CODEC_CONFIG, csd, encrypted = true, channel = videoChannelId)
-                log.i("-> CodecConfig (${csd.size} bytes SPS/PPS)")
+                if (TruckTests.csdMode != "prepend") {
+                    send(MSG_MEDIA_CODEC_CONFIG, csd, encrypted = true, channel = videoChannelId)
+                    log.i("-> CodecConfig (${csd.size} bytes SPS/PPS)")
+                } else {
+                    log.i("CodecConfig held back (${csd.size} bytes) - prepending to keyframes instead")
+                }
                 log.hex("   csd", csd, limit = 64)
             },
             onFrame = { data, presentationTimeUs, keyFrame ->
@@ -894,12 +904,13 @@ class GearslipRunner(
         if (!videoProjected) return
         synchronized(ackLock) {
             val waitStart = System.currentTimeMillis()
-            while (running && inFlight >= maxUnacked) {
+            while (running && TruckTests.waitVideoAcks() && inFlight >= maxUnacked) {
                 // A lost ack would otherwise hold the stream forever, which looks like a frozen
                 // picture. After a long silence, assume the window cleared and carry on.
                 val since = System.currentTimeMillis() - lastAckAt
                 if (since > ACK_STALL_MS) {
                     log.w("no ack for ${since}ms with $inFlight in flight - resetting the window")
+                    TruckTests.onVideoStall()
                     inFlight = 0
                     lastAckAt = System.currentTimeMillis() // one warning per stall, not one per frame
                     break
@@ -909,10 +920,19 @@ class GearslipRunner(
             ackWaitMs += System.currentTimeMillis() - waitStart
         }
         if (!running) return
+        // devfix: experiment with the timestamp the car sees.
+        val pts = when (TruckTests.ptsMode) {
+            "wall" -> System.nanoTime() / 1_000
+            "zero" -> 0L
+            else -> presentationTimeUs
+        }
         val timestamp = ByteArray(8)
         for (i in 0 until 8) {
-            timestamp[i] = ((presentationTimeUs shr ((7 - i) * 8)) and 0xFF).toByte()
+            timestamp[i] = ((pts shr ((7 - i) * 8)) and 0xFF).toByte()
         }
+        // devfix: some head units want SPS/PPS in front of every keyframe.
+        val csd = lastCodecConfig
+        val payloadData = if (keyFrame && csd != null && TruckTests.csdMode != "separate") csd + data else data
         if (keyFrame) {
             if (resyncRequested) {
                 log.i("resync keyframe delivered after $resyncAttempts attempt(s)")
@@ -924,7 +944,7 @@ class GearslipRunner(
         // Counted before it's queued: the writer may send it and the ack come back before this
         // thread runs again, and an ack counted ahead of its frame would leave the window full.
         synchronized(ackLock) { inFlight++ }
-        send(MSG_MEDIA_DATA, timestamp + data, encrypted = true, channel = videoChannelId)
+        send(MSG_MEDIA_DATA, timestamp + payloadData, encrypted = true, channel = videoChannelId)
         reportTouchLatency(presentationTimeUs)
         framesSent++
         if (framesSent <= 3 || keyFrame && framesSent % 30 == 0) {
@@ -1039,6 +1059,11 @@ class GearslipRunner(
         val payload = byteArrayOf(
             ((messageId shr 8) and 0xFF).toByte(), (messageId and 0xFF).toByte(),
         ) + body
+
+        if (TruckTests.verbose) {
+            log.i(">> ch=$channel id=$messageId len=${body.size} enc=$encrypted")
+            log.hex("   out", body, limit = 48)
+        }
 
         // Every write goes through one thread, in order. The reading thread must never wait on
         // a write: a head unit like LIVI writes its ack before it reads on, so a reader stuck
@@ -1178,7 +1203,7 @@ class GearslipRunner(
                     // head unit's acks, not the phone, set the frame rate.
                     val waited = ackWaitMs
                     ackWaitMs = 0
-                    SessionReport.stream("${"%.1f".format(fps)} fps, sent=$sent acked=$acksSeen")
+                    SessionReport.stream("${"%.1f".format(fps)} fps, sent=$sent acked=$acksSeen, ${TruckTests.summary()}")
                     if (acksSeen == 0 && sent >= maxUnacked) {
                         log.w(
                             "video: the head unit has not acked a single frame ($sent sent) - it is " +
