@@ -200,6 +200,9 @@ private fun TruckTestSection() {
         CycleRow("SPS/PPS delivery", app.seb3thehacker.gearslip.TruckTests.KEY_CSD,
             listOf("separate" to "Separate CodecConfig message", "prepend" to "On every keyframe", "both" to "Both"))
         SettingsDivider()
+        CycleRow("Steady frames", app.seb3thehacker.gearslip.TruckTests.KEY_STEADY,
+            listOf("off" to "Off", "on" to "On (repeat last keyframe when screen is still)"))
+        SettingsDivider()
         CycleRow("Verbose debug logs", app.seb3thehacker.gearslip.TruckTests.KEY_VERBOSE,
             listOf("off" to "Off", "on" to "On (logs every message, large log)"))
     }

@@ -15,6 +15,8 @@ object TruckTests {
     @Volatile var csdMode = "separate"
     /** Log every message in and out with its bytes. */
     @Volatile var verbose = false
+    /** "off" or "on": resend the last keyframe whenever the screen is still, ~10 fps. */
+    @Volatile var steadyFrames = "off"
 
     /** Set at runtime when "auto" decides the car isn't acking. */
     @Volatile var videoAckBypass = false
@@ -47,15 +49,17 @@ object TruckTests {
         ptsMode = AppSettings.getString(context, KEY_PTS, "encoder")
         csdMode = AppSettings.getString(context, KEY_CSD, "separate")
         verbose = AppSettings.getString(context, KEY_VERBOSE, "off") == "on"
+        steadyFrames = AppSettings.getString(context, KEY_STEADY, "off")
         videoAckBypass = false; audioAckBypass = false; videoStalls = 0; audioStalls = 0
-        GearslipLog.i("truck tests: ackMode=$ackMode pts=$ptsMode csd=$csdMode verbose=$verbose")
+        GearslipLog.i("truck tests: ackMode=$ackMode pts=$ptsMode csd=$csdMode verbose=$verbose steady=$steadyFrames")
     }
 
     const val KEY_ACK = "tt_ack_mode"
     const val KEY_PTS = "tt_pts_mode"
     const val KEY_CSD = "tt_csd_mode"
     const val KEY_VERBOSE = "tt_verbose"
+    const val KEY_STEADY = "tt_steady"
 
     fun summary() = "ack=$ackMode${if (videoAckBypass) "(video→nowait)" else ""}" +
-        "${if (audioAckBypass) "(audio→nowait)" else ""} pts=$ptsMode csd=$csdMode verbose=$verbose"
+        "${if (audioAckBypass) "(audio→nowait)" else ""} pts=$ptsMode csd=$csdMode verbose=$verbose steady=$steadyFrames"
 }

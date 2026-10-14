@@ -146,6 +146,17 @@ class AudioLink(
         val name = FOCUS_STATES[state] ?: "unknown($state)"
         GearslipLog.i("audio: <- AudioFocusResponse state=$name")
         focusGranted = state == FOCUS_STATE_GAIN || state == FOCUS_STATE_GAIN_TRANSIENT
+        if (focusGranted && started) {
+            // devfix: chunks sent before focus was granted are thrown away by the car and never
+            // acked. Counting them left the window permanently part-full, so audio ran at about
+            // half speed and stalled. Start the count fresh from the grant.
+            synchronized(ackLock) {
+                GearslipLog.i("audio: focus granted - forgetting $inFlight unacked pre-focus chunks")
+                inFlight = 0
+                lastAckAt = System.currentTimeMillis()
+                ackLock.notifyAll()
+            }
+        }
         if (focusGranted) startStream() else stop()
     }
 
@@ -200,6 +211,7 @@ class AudioLink(
                     GearslipLog.w("audio: no ack for ${STALL_MS}ms with $inFlight in flight - reopening the window")
                     app.seb3thehacker.gearslip.TruckTests.onAudioStall()
                     inFlight = 0
+                    lastAckAt = System.currentTimeMillis()
                     break
                 }
                 ackLock.wait(STALL_MS - waited + 1)

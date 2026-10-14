@@ -877,7 +877,7 @@ class GearslipRunner(
                 log.hex("   csd", csd, limit = 64)
             },
             onFrame = { data, presentationTimeUs, keyFrame ->
-                sendVideoFrame(data, presentationTimeUs, keyFrame)
+                synchronized(steadyLock) { sendVideoFrame(data, presentationTimeUs, keyFrame) }
             },
         ).also { source ->
             runCatching {
@@ -889,6 +889,7 @@ class GearslipRunner(
                 }
             }.onFailure { e -> log.e("encoder start failed", e) }
         }
+        startSteadyFrames()
     }
 
     /**
@@ -899,7 +900,26 @@ class GearslipRunner(
      * minute on LIVI, at 5-12 fps). Waiting here holds the encoder back instead, which simply
      * makes it produce fewer frames, each one whole.
      */
-    private fun sendVideoFrame(data: ByteArray, presentationTimeUs: Long, keyFrame: Boolean) {
+    @Volatile private var lastKeyFrame: ByteArray? = null
+    @Volatile private var lastFrameSentAt = 0L
+
+    /** devfix: keep frames flowing while the screen is still, by resending the last keyframe. */
+    private fun startSteadyFrames() {
+        if (TruckTests.steadyFrames != "on") return
+        log.i("steady frames: resending the last keyframe whenever the screen is still")
+        Thread {
+            while (running) {
+                runCatching { Thread.sleep(100) }
+                val key = lastKeyFrame ?: continue
+                if (videoProjected && System.currentTimeMillis() - lastFrameSentAt >= 100) {
+                    synchronized(steadyLock) { sendVideoFrame(key, System.nanoTime() / 1_000, true, isRepeat = true) }
+                }
+            }
+        }.apply { name = "gearslip-steady"; isDaemon = true; start() }
+    }
+    private val steadyLock = Object()
+
+    private fun sendVideoFrame(data: ByteArray, presentationTimeUs: Long, keyFrame: Boolean, isRepeat: Boolean = false) {
         // The car is showing its own screen and would throw these away.
         if (!videoProjected) return
         synchronized(ackLock) {
@@ -933,6 +953,8 @@ class GearslipRunner(
         // devfix: some head units want SPS/PPS in front of every keyframe.
         val csd = lastCodecConfig
         val payloadData = if (keyFrame && csd != null && TruckTests.csdMode != "separate") csd + data else data
+        lastFrameSentAt = System.currentTimeMillis()
+        if (keyFrame && !isRepeat) lastKeyFrame = data
         if (keyFrame) {
             if (resyncRequested) {
                 log.i("resync keyframe delivered after $resyncAttempts attempt(s)")
