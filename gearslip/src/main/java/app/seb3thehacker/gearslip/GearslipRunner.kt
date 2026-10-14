@@ -33,6 +33,10 @@ class GearslipRunner(
     private val identityProvider: () -> CertProvider.Identity,
     private val projection: Projection? = null,
     private val vehicleProfileFor: (ServiceDiscovery.HeadUnitInfo) -> VehicleProfile? = { null },
+    /** "800x480" / "1280x720" / null (auto). From Settings → Truck tests. */
+    private val resolutionOverride: String? = null,
+    /** Absolute encoder bitrate in bps, or null for the default formula. */
+    private val bitRateOverride: Int? = null,
 ) {
     private val log = GearslipLog.tagged("PROTO")
 
@@ -206,7 +210,12 @@ class GearslipRunner(
             MSG_SERVICE_DISCOVERY_RESPONSE -> onServiceDiscoveryResponse(body)
             MSG_PING_REQUEST -> onPingRequest(body)
             MSG_BYEBYE_REQUEST -> onByeByeRequest(body)
-            MSG_PING_RESPONSE -> if (phonePingResponses++ % 15 == 0) log.i("<- PingResponse (#$phonePingResponses)")
+            MSG_PING_RESPONSE -> {
+                phonePingResponses++
+                if (phonePingResponses <= 5 || phonePingResponses % 15 == 0) {
+                    log.i("<- PingResponse (#$phonePingResponses)")
+                }
+            }
             AudioLink.MSG_FOCUS_RESPONSE -> audioLink?.onFocus(Protobuf.readInt32Field(body, 1) ?: 0)
             else -> log.i("unhandled control message id=$messageId (${body.size} bytes) - continuing")
         }
@@ -741,11 +750,16 @@ class GearslipRunner(
                 )
                 if (maxUnackedFromConfig != null) maxUnacked = maxOf(1, maxUnackedFromConfig)
                 val offered = indices.map { it.toInt() }
-                val preferred = vehicleProfile?.resolution?.let { want ->
+                val overrideWant = resolutionOverride?.takeIf { it.isNotBlank() && it != "auto" }
+                val preferred = (overrideWant ?: vehicleProfile?.resolution)?.let { want ->
                     offered.firstOrNull { videoConfigs.getOrNull(it)?.resolutionName == want }
                 }
                 selectedConfigIndex = preferred ?: fitToScreen(offered) ?: offered.firstOrNull()
-                log.i("selected config index $selectedConfigIndex from offered $offered")
+                log.i(
+                    "selected config index $selectedConfigIndex from offered $offered " +
+                        "(override=${overrideWant ?: "none"}, profile=${vehicleProfile?.resolution ?: "none"}, " +
+                        "bitrate=${bitRateOverride?.let { "${it / 1000}kbps" } ?: "normal"})",
+                )
                 SessionReport.video(
                     "${videoConfigs.getOrNull(selectedConfigIndex ?: -1)?.resolutionName ?: "?"} " +
                         "(head unit offered ${offered.size}), max_unacked=$maxUnacked",
@@ -845,6 +859,7 @@ class GearslipRunner(
             height = height,
             frameRate = if (config.frameRate == 1) 60 else 30,
             mode = if (useProjection) VideoSource.Mode.SURFACE else VideoSource.Mode.TEST_CARD,
+            bitRateOverride = bitRateOverride,
             onCodecConfig = { csd ->
                 lastCodecConfig = csd
                 send(MSG_MEDIA_CODEC_CONFIG, csd, encrypted = true, channel = videoChannelId)

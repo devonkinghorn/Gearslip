@@ -91,6 +91,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(0.dp))
             AboutSection(onOpenWhatsNew, onReplayTutorial)
             ConnectionSection()
+            TruckTestSection()
             if (SHOW_RECOMMENDED_APPS) AppsSection(onOpenRecommendedApps)
             CertificateSection()
             SettingsSection("Usage notes", header = USAGE_STATS_INTRO) { UsageStatsRows() }
@@ -143,6 +144,51 @@ private fun ConnectionSection() {
             subtitle = if (enabled) "Gearslip answers when you plug into a car" else "Off: Android Auto can take the connection instead",
             icon = Icons.Filled.Settings,
             trailing = { Switch(checked = enabled, onCheckedChange = null) },
+        )
+    }
+}
+
+
+/** Resolution and bitrate overrides for diagnosing older head units (e.g. 2019 Colorado). */
+@Composable
+private fun TruckTestSection() {
+    val context = LocalContext.current
+    var resolution by remember { mutableStateOf(AppSettings.videoResolution(context)) }
+    var bitrate by remember { mutableStateOf(AppSettings.videoBitrate(context)) }
+    fun resolutionLabel(v: String) = when (v) {
+        "800x480" -> "800×480"
+        "1280x720" -> "1280×720"
+        else -> "Auto (vehicle profile)"
+    }
+    fun bitrateLabel(v: String) = when (v) {
+        "low" -> "Low (2 Mbps)"
+        else -> "Normal"
+    }
+    SettingsSection("Truck tests", footer = "Takes effect the next time you plug into the car.") {
+        SettingsRow(
+            "Video resolution",
+            Modifier.clickable {
+                resolution = when (resolution) {
+                    "auto" -> "800x480"
+                    "800x480" -> "1280x720"
+                    else -> "auto"
+                }
+                AppSettings.setVideoResolution(context, resolution)
+            },
+            subtitle = resolutionLabel(resolution) + " — tap to cycle",
+            icon = Icons.Filled.Settings,
+            trailing = { Arrow() },
+        )
+        SettingsDivider()
+        SettingsRow(
+            "Video bitrate",
+            Modifier.clickable {
+                bitrate = if (bitrate == "normal") "low" else "normal"
+                AppSettings.setVideoBitrate(context, bitrate)
+            },
+            subtitle = bitrateLabel(bitrate) + " — tap to cycle",
+            icon = Icons.Filled.Settings,
+            trailing = { Arrow() },
         )
     }
 }

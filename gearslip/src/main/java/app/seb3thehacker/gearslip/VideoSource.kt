@@ -23,6 +23,7 @@ class VideoSource(
     private val height: Int,
     private val frameRate: Int,
     private val mode: Mode = Mode.TEST_CARD,
+    private val bitRateOverride: Int? = null,
     private val onCodecConfig: (ByteArray) -> Unit,
     private val onFrame: (data: ByteArray, presentationTimeUs: Long, keyFrame: Boolean) -> Unit,
 ) {
@@ -45,7 +46,8 @@ class VideoSource(
     private var frameIndex = 0L
 
     fun start() {
-        val bitRate = (width.toLong() * height * frameRate * BITS_PER_PIXEL).toInt().coerceIn(MIN_BIT_RATE, MAX_BIT_RATE)
+        val bitRate = bitRateOverride
+            ?: (width.toLong() * height * frameRate * BITS_PER_PIXEL).toInt().coerceIn(MIN_BIT_RATE, MAX_BIT_RATE)
         fun format(tuned: Boolean) = MediaFormat.createVideoFormat(MIME, width, height).apply {
             setInteger(
                 MediaFormat.KEY_COLOR_FORMAT,

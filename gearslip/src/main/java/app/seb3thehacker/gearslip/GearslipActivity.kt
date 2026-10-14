@@ -302,12 +302,20 @@ class GearslipActivity : ComponentActivity(), Projection {
         }
         descriptor = pfd
 
+        val res = AppSettings.videoResolution(this).takeIf { it != "auto" }
+        val bitrate = when (AppSettings.videoBitrate(this)) {
+            "low" -> 2_000_000
+            else -> null
+        }
+        GearslipLog.i("truck-test settings: resolution=${res ?: "auto"} bitrate=${bitrate?.let { "${it / 1000}kbps" } ?: "normal"}")
         val runner = GearslipRunner(
             input = FileInputStream(pfd.fileDescriptor),
             output = FileOutputStream(pfd.fileDescriptor),
             identityProvider = { CertProvider.load(this) },
             projection = this,
             vehicleProfileFor = { info -> VehicleProfiles.find(VehicleProfiles.load(this), info) },
+            resolutionOverride = res,
+            bitRateOverride = bitrate,
         )
         this.runner = runner
         worker = Thread { runner.run() }.apply { name = "gearslip"; start() }

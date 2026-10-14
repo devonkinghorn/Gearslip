@@ -13,6 +13,8 @@ object AppSettings {
     private const val KEY_SKIPPED_CERT_SETUP = "skipped_cert_setup"
     private const val KEY_SEEN_PERMISSIONS_SETUP = "seen_permissions_setup"
     private const val KEY_GEARSLIP_ENABLED = "gearslip_enabled"
+    private const val KEY_VIDEO_RESOLUTION = "video_resolution"
+    private const val KEY_VIDEO_BITRATE = "video_bitrate"
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -93,5 +95,26 @@ object AppSettings {
         if (pm.getComponentEnabledSetting(component) == state) return
         runCatching { pm.setComponentEnabledSetting(component, state, PackageManager.DONT_KILL_APP) }
             .onFailure { GearslipLog.e("could not switch the USB connection ${if (value) "on" else "off"}", it) }
+    }
+
+    /**
+     * Forced video resolution for truck tests: "auto" (use vehicle profile / fit),
+     * "800x480", or "1280x720". Applied on the next connect.
+     */
+    fun videoResolution(context: Context): String =
+        prefs(context).getString(KEY_VIDEO_RESOLUTION, "auto") ?: "auto"
+
+    fun setVideoResolution(context: Context, value: String) {
+        prefs(context).edit().putString(KEY_VIDEO_RESOLUTION, value).apply()
+    }
+
+    /**
+     * Forced encoder bitrate for truck tests: "normal" (default formula) or "low" (2 Mbps).
+     */
+    fun videoBitrate(context: Context): String =
+        prefs(context).getString(KEY_VIDEO_BITRATE, "normal") ?: "normal"
+
+    fun setVideoBitrate(context: Context, value: String) {
+        prefs(context).edit().putString(KEY_VIDEO_BITRATE, value).apply()
     }
 }
