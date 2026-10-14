@@ -43,7 +43,9 @@ class CarMic(
                 val status = Protobuf.readInt32Field(body, 1) ?: 0
                 GearslipLog.i("mic: <- ChannelOpenResponse: status=$status")
                 if (status != 0) return
-                sendOnChannel(MSG_SETUP, Protobuf.varintField(1, 0L))
+                // devfix: Setup { type = MediaCodecType }, not a config index (see AudioLink).
+                sendOnChannel(MSG_SETUP, Protobuf.varintField(1, service.codecType.toLong()))
+                GearslipLog.i("mic: -> Setup(type=${service.codecType})")
                 ready = usable
                 if (!usable) {
                     GearslipLog.w(
@@ -67,6 +69,8 @@ class CarMic(
                 if (packets++ == 0) GearslipLog.i("mic: first audio from the car (${body.size - TIMESTAMP_BYTES} bytes)")
                 chunks.offer(toSpeechRate(body))
             }
+
+            255 -> GearslipLog.w("mic: <- id 255 (head unit rejected our last message on this channel)")
 
             else -> GearslipLog.i("mic: <- unhandled message id=$messageId (${body.size} bytes)")
         }

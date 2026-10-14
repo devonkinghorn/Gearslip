@@ -54,8 +54,12 @@ class AudioLink(
         // AVChannelSetupRequest { required uint32 config_index = 1 }. This field is an index into
         // the sink's own audio_configs, not a codec id - sending the codec type asks for a config
         // the sink does not have, and it answers with a status that never reaches READY.
-        sendOnChannel(MSG_SETUP, Protobuf.varintField(1, 0L))
-        GearslipLog.i("audio: -> Setup(config_index=0) on channel ${service.serviceId}, codec ${service.codecName}")
+        // devfix: field 1 of Setup is MediaCodecType (aap_protobuf media Setup { type = 1 }), the
+        // same field the video channel fills with VIDEO_H264_BP and gets READY for. Sending 0 (no
+        // such codec) is what both a 2019 GM (AA 1.3) and a 2021 Bolt (AA 1.5) answer with the
+        // bare two-byte id 255 - an "unexpected/invalid message" reply, not a Config.
+        sendOnChannel(MSG_SETUP, Protobuf.varintField(1, service.codecType.toLong()))
+        GearslipLog.i("audio: -> Setup(type=${service.codecType}) on channel ${service.serviceId}, codec ${service.codecName}")
         armConfigFallback()
     }
 
@@ -122,6 +126,8 @@ class AudioLink(
                     ackLock.notifyAll()
                 }
             }
+
+            MSG_INVALID -> GearslipLog.w("audio: <- id 255 (head unit rejected our last message on this channel)")
 
             // Whatever the head unit answers Setup with, we need its bytes to identify it.
             else -> {
@@ -243,6 +249,7 @@ class AudioLink(
         private const val MSG_STOP = 32770
         private const val MSG_CONFIG = 32771
         private const val MSG_ACK = 32772
+        private const val MSG_INVALID = 255
         private const val STATUS_READY = 2
         private const val FOCUS_GAIN = 1
         private const val FOCUS_RELEASE = 4

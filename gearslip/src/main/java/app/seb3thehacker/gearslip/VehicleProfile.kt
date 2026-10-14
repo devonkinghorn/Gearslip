@@ -43,6 +43,12 @@ object VehicleProfiles {
               "match": { "carModel": "Dodge Challenger", "headUnitName": "Uconnect" },
               "resolution": "800x480",
               "insets": { "top": 30, "bottom": 30, "left": 0, "right": 0 }
+            },
+            {
+              "name": "2019 Chevrolet Colorado (GM, AA 1.3)",
+              "match": { "headUnitName": "Chevrolet", "carModel": "myChevrolet", "carYear": "2019" },
+              "resolution": "800x480",
+              "insets": { "top": 0, "bottom": 0, "left": 0, "right": 0 }
             }
           ]
         }

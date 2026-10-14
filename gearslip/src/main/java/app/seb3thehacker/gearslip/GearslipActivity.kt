@@ -277,7 +277,24 @@ class GearslipActivity : ComponentActivity(), Projection {
         describe(accessory)
 
         val manager = getSystemService(UsbManager::class.java)
-        val pfd = manager.openAccessory(accessory)
+        // devfix: a stale ATTACHED intent (the car already dropped the link) made openAccessory
+        // throw IllegalArgumentException("no accessory attached") and crash the activity.
+        if (manager.accessoryList?.none { it == accessory } != false) {
+            GearslipLog.w("accessory is no longer attached - waiting for the car to reconnect")
+            SessionStatus.failed("Car disconnected", "The car dropped the USB link before Gearslip could open it. Unplug and plug back in.")
+            return
+        }
+        val pfd = try {
+            manager.openAccessory(accessory)
+        } catch (e: IllegalArgumentException) {
+            GearslipLog.w("openAccessory failed: ${e.message} - the car detached before we could open it")
+            SessionStatus.failed("Car disconnected", "The car dropped the USB link before Gearslip could open it. Unplug and plug back in.")
+            return
+        } catch (e: SecurityException) {
+            GearslipLog.w("openAccessory denied: ${e.message}")
+            SessionStatus.failed("Accessory unavailable", "Android did not grant access to the car's USB connection.")
+            return
+        }
         if (pfd == null) {
             GearslipLog.e("openAccessory returned null - the session was claimed by someone else")
             SessionStatus.failed("Accessory unavailable", "Another app claimed the USB accessory before Gearslip could open it.")

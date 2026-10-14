@@ -80,6 +80,9 @@ class GearslipRunner(
     @Volatile private var resyncRequested = false
     @Volatile private var resyncAttempts = 0
     @Volatile private var lastKeyframeSentAt = 0L
+    @Volatile private var lastPingFromCarAt = 0L
+    private var phonePingsSent = 0
+    private var phonePingResponses = 0
 
     fun run() {
         SessionReport.begin()
@@ -203,6 +206,7 @@ class GearslipRunner(
             MSG_SERVICE_DISCOVERY_RESPONSE -> onServiceDiscoveryResponse(body)
             MSG_PING_REQUEST -> onPingRequest(body)
             MSG_BYEBYE_REQUEST -> onByeByeRequest(body)
+            MSG_PING_RESPONSE -> if (phonePingResponses++ % 15 == 0) log.i("<- PingResponse (#$phonePingResponses)")
             AudioLink.MSG_FOCUS_RESPONSE -> audioLink?.onFocus(Protobuf.readInt32Field(body, 1) ?: 0)
             else -> log.i("unhandled control message id=$messageId (${body.size} bytes) - continuing")
         }
@@ -824,6 +828,9 @@ class GearslipRunner(
             Protobuf.varintField(2, index.toLong())
         send(MSG_MEDIA_START, start, encrypted = true, channel = videoChannelId)
         log.i("-> Start(session_id=$SESSION_ID, configuration_index=$index -> $config)")
+        // devfix: the stall timer measured from epoch 0 until the first ack ever arrived, so the
+        // first full window was "reset" at once ("no ack for 1791936792239ms").
+        synchronized(ackLock) { lastAckAt = System.currentTimeMillis() }
         // The car crops its margins off the frame, so keep the UI out of them unless a vehicle
         // profile has its own tuned insets.
         if (vehicleProfile?.insets.let { it == null || it == Insets.NONE }) {
@@ -1001,6 +1008,7 @@ class GearslipRunner(
     private fun onPingRequest(body: ByteArray) {
         // The timestamp is an int64 and has to come back unchanged. Read as an int32 it was cut
         // short, and a car that checks the echo (an Audi MIB2+) gave up at its second ping.
+        lastPingFromCarAt = System.currentTimeMillis()
         val timestamp = Protobuf.readInt64Field(body, 1) ?: System.nanoTime()
         send(MSG_PING_RESPONSE, Protobuf.varintField(1, timestamp), encrypted = tls.handshakeComplete)
         log.i("<- PingRequest(timestamp=$timestamp) / -> PingResponse (keeping the session alive)")
@@ -1112,7 +1120,28 @@ class GearslipRunner(
         SessionReport.print()
     }
 
+    /**
+     * devfix: keepalive. Newer units (the 2021 Bolt, AA 1.5) ping the phone every second; the
+     * 2019 Colorado (AA 1.3) never pinged once and dropped USB 20-60s in. Either side may ping
+     * (the receiver answers PingResponse), so when the car has gone quiet on pings, ping it.
+     */
+    private fun startKeepalive() {
+        Thread {
+            while (running) {
+                try { Thread.sleep(1_000) } catch (e: InterruptedException) { break }
+                if (!running) break
+                if (state == State.DONE && tls.handshakeComplete &&
+                    System.currentTimeMillis() - lastPingFromCarAt > 3_000
+                ) {
+                    send(MSG_PING_REQUEST, Protobuf.varintField(1, System.nanoTime() / 1000), encrypted = true)
+                    if (phonePingsSent++ % 15 == 0) log.i("-> PingRequest (phone keepalive #$phonePingsSent)")
+                }
+            }
+        }.apply { isDaemon = true; name = "gearslip-keepalive" }.start()
+    }
+
     private fun startWatchdog() {
+        startKeepalive()
         Thread {
             var lastFrames = 0
             while (running) {
@@ -1135,6 +1164,12 @@ class GearslipRunner(
                     val waited = ackWaitMs
                     ackWaitMs = 0
                     SessionReport.stream("${"%.1f".format(fps)} fps, sent=$sent acked=$acksSeen")
+                    if (acksSeen == 0 && sent >= maxUnacked) {
+                        log.w(
+                            "video: the head unit has not acked a single frame ($sent sent) - it is " +
+                                "not decoding this stream. Try a smaller resolution in vehicles.json.",
+                        )
+                    }
                     log.i(
                         "video: ${"%.1f".format(fps)} fps over 5s | sent=$sent waited=${waited}ms " +
                             "acked=$acksSeen inFlight=$inFlight split=$splitMessages",
