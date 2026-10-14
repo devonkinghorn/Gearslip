@@ -772,8 +772,13 @@ class GearslipRunner(
                 // VideoFocusRequestNotification { mode = 2; reason = 3 }
                 val focus = Protobuf.varintField(2, VIDEO_FOCUS_PROJECTED.toLong()) +
                     Protobuf.varintField(3, 1L)
-                send(MSG_VIDEO_FOCUS_REQUEST, focus, encrypted = true, channel = videoChannelId)
-                log.i("-> VideoFocusRequest(mode=PROJECTED)")
+                if (TruckTests.focusMode == "skip") {
+                    log.i("focus=skip: not requesting video focus; sending Start and waiting for the car to grant it")
+                    onVideoFocus(VIDEO_FOCUS_PROJECTED)
+                } else {
+                    send(MSG_VIDEO_FOCUS_REQUEST, focus, encrypted = true, channel = videoChannelId)
+                    log.i("-> VideoFocusRequest(mode=PROJECTED)")
+                }
             }
 
             MSG_VIDEO_FOCUS_NOTIFICATION -> {
@@ -866,7 +871,9 @@ class GearslipRunner(
             frameRate = if (config.frameRate == 1) 60 else 30,
             mode = if (useProjection) VideoSource.Mode.SURFACE else VideoSource.Mode.TEST_CARD,
             bitRateOverride = bitRateOverride,
-            onCodecConfig = { csd ->
+            onCodecConfig = { rawCsd ->
+                val csd = TruckTests.patchSps(rawCsd)
+                if (TruckTests.spsFlags != "off") log.i("SPS constraint flags patched to ${TruckTests.spsFlags}")
                 lastCodecConfig = csd
                 if (TruckTests.csdMode != "prepend") {
                     send(MSG_MEDIA_CODEC_CONFIG, csd, encrypted = true, channel = videoChannelId)
@@ -952,7 +959,7 @@ class GearslipRunner(
         }
         // devfix: some head units want SPS/PPS in front of every keyframe.
         val csd = lastCodecConfig
-        val payloadData = if (keyFrame && csd != null && TruckTests.csdMode != "separate") csd + data else data
+        val payloadData = TruckTests.patchSps(if (keyFrame && csd != null && TruckTests.csdMode != "separate") csd + data else data)
         lastFrameSentAt = System.currentTimeMillis()
         if (keyFrame && !isRepeat) lastKeyFrame = data
         if (keyFrame) {

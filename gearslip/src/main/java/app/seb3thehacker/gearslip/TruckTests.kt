@@ -22,6 +22,26 @@ object TruckTests {
     /** Audio chunk size in bytes: "4096" or "2048". */
     @Volatile var audioChunk = "4096"
 
+    /** SPS constraint flags byte: "off" (as encoded), "c0", or "e0" (constrained baseline). */
+    @Volatile var spsFlags = "off"
+    /** "request" (ask the car for video focus) or "skip" (send Start and let the car grant it). */
+    @Volatile var focusMode = "request"
+
+    /** Rewrites the constraint byte of every Baseline SPS (00 00 01 67 42 xx) in place. */
+    fun patchSps(b: ByteArray): ByteArray {
+        val v = when (spsFlags) { "c0" -> 0xC0; "e0" -> 0xE0; else -> return b }
+        val out = b.copyOf()
+        var i = 0
+        while (i + 5 < out.size) {
+            if (out[i] == 0.toByte() && out[i + 1] == 0.toByte() && out[i + 2] == 1.toByte() &&
+                (out[i + 3].toInt() and 0x1F) == 7 && out[i + 4] == 0x42.toByte()) {
+                out[i + 5] = v.toByte()
+                i += 6
+            } else i++
+        }
+        return out
+    }
+
     /** Set at runtime when "auto" decides the car isn't acking. */
     @Volatile var videoAckBypass = false
     @Volatile var audioAckBypass = false
@@ -56,8 +76,10 @@ object TruckTests {
         steadyFrames = AppSettings.getString(context, KEY_STEADY, "off")
         audioAckCredit = AppSettings.getString(context, KEY_AUDIO_CREDIT, "1")
         audioChunk = AppSettings.getString(context, KEY_AUDIO_CHUNK, "4096")
+        spsFlags = AppSettings.getString(context, KEY_SPS, "off")
+        focusMode = AppSettings.getString(context, KEY_FOCUS, "request")
         videoAckBypass = false; audioAckBypass = false; videoStalls = 0; audioStalls = 0
-        GearslipLog.i("truck tests: ackMode=$ackMode pts=$ptsMode csd=$csdMode verbose=$verbose steady=$steadyFrames audioCredit=$audioAckCredit audioChunk=$audioChunk")
+        GearslipLog.i("truck tests: ackMode=$ackMode pts=$ptsMode csd=$csdMode verbose=$verbose steady=$steadyFrames audioCredit=$audioAckCredit audioChunk=$audioChunk sps=$spsFlags focus=$focusMode")
     }
 
     const val KEY_ACK = "tt_ack_mode"
@@ -67,7 +89,9 @@ object TruckTests {
     const val KEY_STEADY = "tt_steady"
     const val KEY_AUDIO_CREDIT = "tt_audio_credit"
     const val KEY_AUDIO_CHUNK = "tt_audio_chunk"
+    const val KEY_SPS = "tt_sps_flags"
+    const val KEY_FOCUS = "tt_focus_mode"
 
     fun summary() = "ack=$ackMode${if (videoAckBypass) "(video→nowait)" else ""}" +
-        "${if (audioAckBypass) "(audio→nowait)" else ""} pts=$ptsMode csd=$csdMode verbose=$verbose steady=$steadyFrames audioCredit=$audioAckCredit audioChunk=$audioChunk"
+        "${if (audioAckBypass) "(audio→nowait)" else ""} pts=$ptsMode csd=$csdMode verbose=$verbose steady=$steadyFrames audioCredit=$audioAckCredit audioChunk=$audioChunk sps=$spsFlags focus=$focusMode"
 }

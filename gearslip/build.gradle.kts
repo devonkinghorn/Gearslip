@@ -32,8 +32,8 @@ android {
         applicationId = "app.seb3thehacker.gearslip"
         minSdk = 31
         targetSdk = 37
-        versionCode = 12
-        versionName = "0.2.00-alpha-devfix-5"
+        versionCode = 13
+        versionName = "0.2.00-alpha-devfix-6"
         manifestPlaceholders["appLabel"] = "Gearslip"
         // Where opted-in phones send their daily usage note: the stats-worker/ Worker's address,
         // set as gearslipStatsUrl in gradle.properties. Left empty, nothing is ever sent.
