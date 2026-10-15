@@ -19,8 +19,8 @@ object TruckTests {
     @Volatile var steadyFrames = "off"
     /** Audio chunks freed per ack from the car: "1" or "2". */
     @Volatile var audioAckCredit = "1"
-    /** Audio chunk size in bytes: "4096" or "2048". */
-    @Volatile var audioChunk = "4096"
+    /** Audio chunk size in bytes: "8192" (devfix-8 default), "4096", or "2048". */
+    @Volatile var audioChunk = "8192"
 
     /** SPS constraint flags byte: "off" (as encoded), "c0", or "e0" (constrained baseline). */
     @Volatile var spsFlags = "off"
@@ -75,7 +75,7 @@ object TruckTests {
         verbose = AppSettings.getString(context, KEY_VERBOSE, "off") == "on"
         steadyFrames = AppSettings.getString(context, KEY_STEADY, "off")
         audioAckCredit = AppSettings.getString(context, KEY_AUDIO_CREDIT, "1")
-        audioChunk = AppSettings.getString(context, KEY_AUDIO_CHUNK, "4096")
+        audioChunk = AppSettings.getString(context, KEY_AUDIO_CHUNK, "8192")
         spsFlags = AppSettings.getString(context, KEY_SPS, "off")
         focusMode = AppSettings.getString(context, KEY_FOCUS, "request")
         videoAckBypass = false; audioAckBypass = false; videoStalls = 0; audioStalls = 0
@@ -88,7 +88,7 @@ object TruckTests {
     const val KEY_VERBOSE = "tt_verbose"
     const val KEY_STEADY = "tt_steady"
     const val KEY_AUDIO_CREDIT = "tt_audio_credit"
-    const val KEY_AUDIO_CHUNK = "tt_audio_chunk"
+    const val KEY_AUDIO_CHUNK = "tt_audio_chunk_v8" // new key so the 8192 default applies after upgrade
     const val KEY_SPS = "tt_sps_flags"
     const val KEY_FOCUS = "tt_focus_mode"
 

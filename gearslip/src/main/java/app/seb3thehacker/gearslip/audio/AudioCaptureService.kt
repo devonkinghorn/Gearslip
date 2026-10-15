@@ -136,7 +136,7 @@ class AudioCaptureService : Service() {
             AudioRecord.Builder()
                 .setAudioPlaybackCaptureConfig(config)
                 .setAudioFormat(format)
-                .setBufferSizeInBytes(maxOf(minimum, CHUNK_BYTES * BUFFER_CHUNKS))
+                .setBufferSizeInBytes(maxOf(minimum, (app.seb3thehacker.gearslip.TruckTests.audioChunk.toIntOrNull() ?: CHUNK_BYTES) * BUFFER_CHUNKS))
                 .build()
         } catch (t: Throwable) {
             GearslipLog.e("audio: could not set up playback capture", t)
@@ -155,7 +155,7 @@ class AudioCaptureService : Service() {
             var warnedSilent = false
             try {
                 record.startRecording()
-                GearslipLog.i("audio: capturing media playback at ${rate}Hz x$channels")
+                GearslipLog.i("audio: capturing media playback at ${rate}Hz x$channels, chunk=${buffer.size} bytes")
                 mutePhone()
                 CarAudio.captureStarted()
                 while (reading) {

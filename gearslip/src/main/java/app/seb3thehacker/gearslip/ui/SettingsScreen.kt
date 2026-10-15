@@ -207,7 +207,7 @@ private fun TruckTestSection() {
             listOf("1" to "1 (normal)", "2" to "2 (car acks every other chunk)"))
         SettingsDivider()
         CycleRow("Audio chunk size", app.seb3thehacker.gearslip.TruckTests.KEY_AUDIO_CHUNK,
-            listOf("4096" to "4096 bytes (normal)", "2048" to "2048 bytes"))
+            listOf("8192" to "8192 bytes (devfix-8 default)", "4096" to "4096 bytes (stock)", "2048" to "2048 bytes"))
         SettingsDivider()
         CycleRow("SPS profile flags", app.seb3thehacker.gearslip.TruckTests.KEY_SPS,
             listOf("off" to "As encoded (42 00)", "c0" to "Constrained baseline (42 C0)", "e0" to "Constrained baseline (42 E0)"))
