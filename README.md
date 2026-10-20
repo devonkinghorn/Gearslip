@@ -7,7 +7,7 @@ An Android Auto alternative built for everyone.
 
 [![forthebadge](https://forthebadge.com/badges/compatibility-club-penguin.svg)](https://forthebadge.com)
 
-[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="80">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/Seb3thehacker/gearslip)
+[<img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="80">](https://apps.obtainium.imranr.dev/redirect?r=obtainium://add/https://github.com/twinksoftware/gearslip)
 
 Questions, ideas?
 [Join the discussion on Matrix](https://matrix.to/#/!mf0_mgBd5KqKpc9FfX_wHp1jFCcwAtPrndIn_oGIyMk?via=matrix.org).
@@ -15,30 +15,33 @@ Questions, ideas?
 ## Which cars work
 
 Most cars work. Starting around 2020, some cars added newer security standards that reject
-Gearslip's certificate, and Gearslip can't run in those cars.
+Gearslip's certificate, and Gearslip can't run in those cars. [CARS.md](CARS.md) lists the
+cars drivers have confirmed.
 
 ## What Gearslip is
 
 Gearslip is an Android Auto client for the phone. It speaks the Android Auto protocol
-directly to a car head unit over USB, with no Google software in the path. Gearslip acts
-as a Car App Library host: an app that ships a car interface hands Gearslip a template,
-and Gearslip renders that template natively on the car screen. Nothing is mirrored from
-the phone. For apps without a car interface, Gearslip offers a separate screen-sharing
-mode.
+directly to a car head unit, over USB or wirelessly, with no Google software in the path.
+Gearslip acts as a Car App Library host: an app that ships a car interface hands Gearslip
+a template, and Gearslip renders that template natively on the car screen. Nothing is
+mirrored from the phone. For apps without a car interface, Gearslip offers a separate
+screen-sharing mode.
 
 | | |
 |---|---|
-| ![The launcher, with apps grouped into phone, maps, music, and messaging](docs/screenshots/launcher.png) | ![Vela Maps giving turn-by-turn directions, with the music player beside the map](docs/screenshots/navigation.png) |
-| Apps sorted by kind. A check marks the ones that work. | Vela Maps navigating, with the player beside it. |
+| ![The launcher, with every car app on the phone and the route in the bar below](docs/screenshots/launcher.png) | ![Vela Maps showing the route, with the music player beside the map](docs/screenshots/navigation.png) |
+| Your car apps in one place. A red X marks the ones that don't work yet. | Vela Maps navigating, with the player beside it. |
 | ![ViVi Music's song, art, and controls in Gearslip's player](docs/screenshots/music.png) | ![A new message card over Organic Maps](docs/screenshots/message.png) |
 | ViVi Music in Gearslip's player. | A new message, read aloud at a tap, over the map. |
 | ![The dashboard, with the weather, the next calendar event, and recent notifications](docs/screenshots/dashboard.png) | ![DuckDuckGo open in Gearslip's web browser](docs/screenshots/web.png) |
 | The weather, your next event, and what you missed. | Browse the web while parked. |
+| ![The voice assistant listening over Organic Maps](docs/screenshots/assistant.png) | ![Coffee shops near you in Vela Maps, with the music player beside the map](docs/screenshots/places.png) |
+| Ask for a place, a song, or an app. | Find coffee nearby without leaving the map. |
 
 ## Features
 
 - **Phone calls.** Dial from a keypad, or search your contacts, then confirm before the
-  call goes out.
+  call goes out. When a call comes in, answer or decline it on the car screen.
 - **Navigation.** Gearslip hosts real Car App Library map apps on the car screen.
   Organic Maps, OsmAnd, and Flitsmeister work today. Vela runs, with rough
   edges.
@@ -49,6 +52,9 @@ mode.
   doesn't ship a car interface of its own.
 - **Weather and the day ahead.** A dashboard screen shows the week's calendar next to
   the current and coming weather.
+- **Voice.** Tap the mic, or press the talk button on the wheel, and say "navigate to the
+  nearest gas station", "play Daft Punk", or "call Mom". Say "help" for the full list.
+  Speech turns into text on the phone, and nothing you say leaves it.
 - **Messages.** New messages appear as a small card on the car screen. Gearslip reads
   each one aloud, and you reply by voice or with a quick reply. Music pauses while
   Gearslip speaks or listens. Speech runs on the phone, so it needs no Google account.
@@ -61,8 +67,9 @@ mode.
 
 ## Status
 
-- **The connection is wired only, for now.** Plug the phone into the head unit's USB port;
-  Gearslip does not yet offer a wireless option.
+- **Wired or wireless.** Plug the phone into the car's USB port, or, in a car with wireless
+  Android Auto, tap Connect wirelessly and pick the car. Pair the phone with the car over
+  Bluetooth first.
 - **Setup walks you through it.** First launch asks for the Android Auto certificate,
   then one permission at a time, each with a plain reason and an Allow or Skip. A help
   screen inside the car answers anything setup didn't cover.
@@ -76,14 +83,30 @@ mode.
   Gearslip's own player.
 - **Calls use the car's Bluetooth,** as they do in Android Auto. Pair the phone with the
   car to hear calls through its speakers.
-- **Audio reaches the car by capturing playback, not by mirroring the screen.** Android
-  shows a screen-share consent dialog for this, even though Gearslip never reads the
-  screen; it is the only way an ordinary app can capture another app's audio. The dialog
-  appears once per drive.
+- **Music reaches the car over Bluetooth or USB.** Setup asks which. Bluetooth is the
+  default: Android never asks for permission, and your map app's voice reaches the car
+  too. USB sounds a little clearer, with no delay, but Android shows a screen-share
+  consent dialog once per drive. Gearslip never reads the screen; capturing playback is
+  the only way an ordinary app can pass another app's audio along.
 - **Gearslip needs no adb, root, or Shizuku.** Every feature relies on an ordinary
-  Android permission or an on-device consent dialog. The setup guide offers two optional
-  adb commands: one removes the audio dialog for good, and the other keeps notifications
-  visible while audio plays.
+  Android permission or an on-device consent dialog. For USB audio, setup offers two
+  optional adb commands: one removes the audio dialog for good, and the other keeps
+  notifications visible while audio plays.
+- **Updates come from GitHub.** Once a day, Gearslip checks this repository's latest
+  release. When a new version is out, it downloads the APK, checks it against GitHub's
+  SHA-256, and installs it through Android's own installer. Turn off automatic checks in
+  Settings.
+
+## Verify your download
+
+Check that your copy of Gearslip is genuine with
+[AppVerifier](https://github.com/soupslurpr/AppVerifier): share this block to it, or compare it
+with the output of `apksigner verify --print-certs`.
+
+```
+app.seb3thehacker.gearslip
+4C:C5:6E:BD:D1:3A:54:D2:60:EC:A9:B7:E2:B2:AE:6B:30:E2:F2:25:BF:DA:8F:50:8F:07:09:ED:F0:84:94:8B
+```
 
 ## Usage notes
 
@@ -92,10 +115,13 @@ turn them on, in setup or in Settings.
 
 - **When they go out.** When you open Gearslip, at most once a day, and after each drive.
   Nothing runs in the background.
-- **What they carry.** The Gearslip version, plus whatever you tick: the Android version
-  and whether the phone runs GrapheneOS, the phone model, whether a car connected that
-  day, and each car's head unit, model, year, screen size, and connection result.
-  Settings shows the exact note.
+- **What they carry.** The Gearslip version and which boxes you ticked, plus whatever
+  those boxes cover: the Android version and whether the phone runs GrapheneOS, the phone
+  model, whether a car connected that day, and each car's head unit, model, year, screen
+  size, and connection result, with whether that drive used the cable or wireless and
+  whether music went over USB or Bluetooth. If you tick it, how each drive went: how far
+  the connection got, how long it lasted, and how it ended. Settings shows the exact note. Untick a phone detail, and
+  the server drops the copy it kept.
 - **What they leave out.** Your name, accounts, location, contacts, messages, and
   anything you type or play.
 - **How phones are counted.** A random number counts each phone once. The server keeps
@@ -157,5 +183,6 @@ any of these companies. All other names belong to their owners.
 
 ## License
 
-Gearslip is licensed under AGPL-3.0; see [LICENSE](LICENSE). The author offers a separate
-commercial license for private use outside the AGPL's terms; see [NOTICE.md](NOTICE.md).
+Gearslip belongs to Twink Software LLC and is licensed under AGPL-3.0; see [LICENSE](LICENSE).
+The LLC also sells a separate commercial license for private use outside the AGPL's terms; see
+[NOTICE.md](NOTICE.md).

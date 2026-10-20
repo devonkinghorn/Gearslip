@@ -100,7 +100,34 @@ object CarAudio {
         _capture.value = Capture.DENIED
     }
 
+    private val _micBlocked = MutableStateFlow(false)
+
+    /** The microphone permission is off for good: Android refuses without asking, so say why. */
+    val micBlocked: StateFlow<Boolean> = _micBlocked.asStateFlow()
+
+    fun micBlocked() {
+        _micBlocked.value = true
+        denied()
+    }
+
+    /** The driver turned the permission back on mid-drive: ask for capture again. */
+    fun micAllowed() {
+        if (!_micBlocked.value) return
+        _micBlocked.value = false
+        if (_capture.value == Capture.DENIED) {
+            _capture.value = Capture.OFF
+            if (wanted) request()
+        }
+    }
+
     internal fun captureStarted() {
+        // Consent can land after the car has already gone (release() ran meanwhile): nothing would
+        // take the sound, and the phone's speaker would stay muted, so end the capture at once.
+        if (!wanted && link == null) {
+            GearslipLog.w("audio: capture started after the car left - stopping it")
+            runCatching { AudioCaptureService.stop() }
+            return
+        }
         _capture.value = Capture.ON
         link?.start()
     }
