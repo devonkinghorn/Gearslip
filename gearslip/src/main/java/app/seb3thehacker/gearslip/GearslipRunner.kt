@@ -70,6 +70,11 @@ class GearslipRunner(
     private var selectedConfigIndex: Int? = null
     private var vehicleProfile: VehicleProfile? = null
     @Volatile private var videoStarted = false
+    /** The car's last reported gear (SensorBatch.gear_data), or null before the first reading. */
+    @Volatile private var carGear: Int? = null
+    /** Set once the phone has asked for the car's screen; the focus timer works from it. */
+    @Volatile private var videoFocusAskedAt = 0L
+    private val videoStartLock = Any()
     private var videoSource: VideoSource? = null
     @Volatile private var inFlight = 0
     /** Guards [inFlight]: the encoder thread waits on it for the head unit's acks. */
@@ -690,6 +695,80 @@ class GearslipRunner(
     }
 
     /**
+     * GearData { gear = 1 } in field 8. A car in reverse shows its backup camera and holds its
+     * screen, so a session that starts in reverse gets no video focus until the driver shifts out.
+     */
+    private fun onGearSensor(body: ByteArray) {
+        val data = Wire.bytes(Wire.fields(body), SENSOR_GEAR) ?: return
+        val gear = Wire.varint(Wire.fields(data), 1)?.toInt() ?: return
+        val before = carGear
+        if (gear == before) return
+        carGear = gear
+        log.i("car: gear ${gearName(gear)}${if (before == null) "" else " (was ${gearName(before)})"}")
+        SessionReport.gear(gearName(gear))
+        if (before == GEAR_REVERSE && !videoStarted && videoFocusAskedAt > 0) {
+            log.i("the car left reverse before video started - asking for its screen again")
+            sendVideoFocusRequest()
+        }
+    }
+
+    private fun gearName(gear: Int) = when (gear) {
+        0 -> "NEUTRAL"
+        GEAR_DRIVE -> "DRIVE"
+        GEAR_PARK -> "PARK"
+        GEAR_REVERSE -> "REVERSE"
+        else -> "GEAR_$gear"
+    }
+
+    private fun sendVideoFocusRequest() {
+        // VideoFocusRequestNotification { mode = 2; reason = 3 }
+        val focus = Protobuf.varintField(2, VIDEO_FOCUS_PROJECTED.toLong()) +
+            Protobuf.varintField(3, 1L)
+        send(MSG_VIDEO_FOCUS_REQUEST, focus, encrypted = true, channel = videoChannelId)
+        log.i("-> VideoFocusRequest(mode=PROJECTED)")
+    }
+
+    /**
+     * Every car so far answered the VideoFocusRequest within milliseconds. If this one doesn't,
+     * ask again after [VIDEO_FOCUS_RETRY_MS], then start the video anyway after
+     * [VIDEO_FOCUS_GIVE_UP_MS]: some units only switch to projection once frames arrive. Not while
+     * the car is in reverse - its camera has the screen, and leaving reverse asks again.
+     */
+    private fun armVideoFocusTimer() {
+        Thread({
+            try {
+                Thread.sleep(VIDEO_FOCUS_RETRY_MS)
+                if (!running || videoStarted) return@Thread
+                log.w("no VideoFocusNotification ${VIDEO_FOCUS_RETRY_MS}ms after asking (gear ${carGear?.let(::gearName) ?: "unknown"}) - asking again")
+                sendVideoFocusRequest()
+                while (running && !videoStarted) {
+                    Thread.sleep(500)
+                    if (System.currentTimeMillis() - videoFocusAskedAt < VIDEO_FOCUS_GIVE_UP_MS) continue
+                    if (carGear == GEAR_REVERSE) continue
+                    beginVideo("started without the car's go-ahead (no VideoFocusNotification after ${VIDEO_FOCUS_GIVE_UP_MS / 1000}s)")
+                    break
+                }
+            } catch (e: InterruptedException) {
+                // session ended
+            } catch (e: Exception) {
+                log.e("video focus timer failed", e)
+            }
+        }, "gearslip-video-focus").apply { isDaemon = true; start() }
+    }
+
+    /** Starts the video once, whichever comes first: the car's grant or the focus timer. */
+    private fun beginVideo(how: String) {
+        synchronized(videoStartLock) {
+            if (videoStarted) return
+            videoStarted = true
+        }
+        CarFocus.request = ::requestNativeFocus
+        SessionReport.videoStart(how)
+        if (how.startsWith("started without")) log.w("video: $how") else log.i("PHASE A COMPLETE - video focus granted; starting video source")
+        startVideoSource()
+    }
+
+    /**
      * The car's own day/night signal (its headlights or light sensor): NightData { bool is_night = 1; }.
      * It replaces the clock guess, so maps go dark when the car does.
      */
@@ -733,6 +812,7 @@ class GearslipRunner(
                 CarSensors.onEvent(body)
                 logSensorEvent(body)
                 onNightSensor(body)
+                onGearSensor(body)
             }
 
             // SensorError { required SensorType sensor_type = 1; required SensorErrorType sensor_error_type = 2; }
@@ -918,11 +998,14 @@ class GearslipRunner(
                     "${videoConfigs.getOrNull(selectedConfigIndex ?: -1)?.resolutionName ?: "?"} " +
                         "(head unit offered ${offered.size}), max_unacked=$maxUnacked",
                 )
-                // VideoFocusRequestNotification { mode = 2; reason = 3 }
-                val focus = Protobuf.varintField(2, VIDEO_FOCUS_PROJECTED.toLong()) +
-                    Protobuf.varintField(3, 1L)
-                send(MSG_VIDEO_FOCUS_REQUEST, focus, encrypted = true, channel = videoChannelId)
-                log.i("-> VideoFocusRequest(mode=PROJECTED)")
+                if (videoFocusAskedAt == 0L) {
+                    videoFocusAskedAt = System.currentTimeMillis()
+                    if (carGear == GEAR_REVERSE) log.w("the car is in REVERSE - its camera has the screen, so video focus may wait until it shifts out")
+                    sendVideoFocusRequest()
+                    armVideoFocusTimer()
+                } else {
+                    sendVideoFocusRequest()
+                }
             }
 
             MSG_VIDEO_FOCUS_NOTIFICATION -> {
@@ -1109,10 +1192,8 @@ class GearslipRunner(
         if (!videoStarted) {
             // The head unit repeats this while it waits for frames; only start once.
             if (!projected) return
-            videoStarted = true
-            CarFocus.request = ::requestNativeFocus
-            log.i("PHASE A COMPLETE - video focus granted; starting video source")
-            startVideoSource()
+            val asked = videoFocusAskedAt
+            beginVideo("car granted focus${if (asked > 0) " ${System.currentTimeMillis() - asked}ms after the request" else ""}")
             return
         }
         if (projected == videoProjected) return
@@ -1376,6 +1457,12 @@ class GearslipRunner(
         const val MSG_SENSOR_ERROR = 32772
         private const val SENSOR_LOCATION = 1
         private const val SENSOR_NIGHT = 10
+        private const val SENSOR_GEAR = 8
+        private const val GEAR_DRIVE = 100
+        private const val GEAR_PARK = 101
+        private const val GEAR_REVERSE = 102
+        private const val VIDEO_FOCUS_RETRY_MS = 1_000L
+        private const val VIDEO_FOCUS_GIVE_UP_MS = 5_000L
         private const val SENSOR_LOG_EVERY_MS = 10_000L
 
         const val STREAM_MEDIA = 3

@@ -64,6 +64,9 @@ object SessionReport {
     @Volatile private var video = ""
     @Volatile private var audio = ""
     @Volatile private var lastStream = ""
+    @Volatile private var videoStart = ""
+    @Volatile private var audioFocus = ""
+    @Volatile private var gear = ""
     @Volatile private var lastState = ""
     private var printed = false
 
@@ -91,6 +94,7 @@ object SessionReport {
         headUnitInfo = null
         carScreen = ""; carDpi = 0
         headUnit = ""; profile = ""; video = ""; lastStream = ""; lastState = ""
+        videoStart = ""; audioFocus = ""; gear = ""
         printed = false
     }
 
@@ -115,6 +119,10 @@ object SessionReport {
     fun video(summary: String) { video = summary }
     fun audio(summary: String) { audio = summary }
     fun stream(summary: String) { lastStream = summary; reached(Stage.STREAMING) }
+    /** How video began: the car's go-ahead, or without it. Blank after Config means it never did. */
+    fun videoStart(summary: String) { videoStart = summary }
+    fun audioFocus(summary: String) { audioFocus = summary }
+    fun gear(name: String) { gear = name }
 
     /**
      * Records the first failure only: later ones are usually fallout from it. [code] is the short
@@ -202,7 +210,12 @@ object SessionReport {
             append(row("auth status", authStatus?.let { "$it (${authName(it)})" } ?: ""))
             append("\n")
             append(row("video", video))
+            if (video.isNotEmpty()) {
+                append(row("video start", videoStart.ifEmpty { "NEVER STARTED - the car sent no VideoFocusNotification" }))
+            }
+            append(row("car gear", gear))
             append(row("audio", audio))
+            append(row("audio focus", audioFocus))
             append(row("last stream stat", lastStream))
             append("=".repeat(60))
         }

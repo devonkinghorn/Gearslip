@@ -47,6 +47,14 @@ class AudioLink(
     private var bytes = 0L
     private var dropped = 0
     @Volatile private var configTimer: Thread? = null
+    @Volatile private var focusTimer: Thread? = null
+    @Volatile private var focusAskedAt = 0L
+    // Ack timing, so a log shows how fast the car really drains the sink.
+    private var acks = 0
+    private var framesAcked = 0
+    private var firstChunkAt = 0L
+    private var firstAckLogged = false
+    private var maxAckGapMs = 0L
     private val ackLock = Object()
     /** Only for a sink that takes AAC and nothing else; PCM sinks get the capture as it is. */
     @Volatile private var aac: AacEncoder? = null
@@ -135,11 +143,20 @@ class AudioLink(
             }
 
             MSG_ACK -> {
-                val acked = Wire.varint(Wire.fields(body), 2)?.toInt() ?: 1
+                // Ack { session_id = 1; ack = 2 }: ack is how many Data messages this one covers.
+                val acked = maxOf(1, Wire.varint(Wire.fields(body), 2)?.toInt() ?: 1)
+                val now = System.currentTimeMillis()
                 synchronized(ackLock) {
-                    inFlight = maxOf(0, inFlight - maxOf(1, acked))
-                    lastAckAt = System.currentTimeMillis()
+                    if (lastAckAt > 0 && acks > 0) maxAckGapMs = maxOf(maxAckGapMs, now - lastAckAt)
+                    inFlight = maxOf(0, inFlight - acked)
+                    lastAckAt = now
+                    acks++
+                    framesAcked += acked
                     ackLock.notifyAll()
+                }
+                if (!firstAckLogged && started) {
+                    firstAckLogged = true
+                    GearslipLog.i("$tag: <- first ack ${now - firstChunkAt}ms after the first chunk (covers $acked)")
                 }
             }
 
@@ -161,6 +178,10 @@ class AudioLink(
     fun onFocus(state: Int) {
         val name = FOCUS_STATES[state] ?: "unknown($state)"
         GearslipLog.i("$tag: <- AudioFocusResponse state=$name")
+        if (asksFocus) {
+            val after = if (focusAskedAt > 0) " ${System.currentTimeMillis() - focusAskedAt}ms after the request" else ""
+            app.seb3thehacker.gearslip.SessionReport.audioFocus("$name$after")
+        }
         val had = focusGranted
         focusGranted = state == FOCUS_STATE_GAIN || state == FOCUS_STATE_GAIN_TRANSIENT ||
             state == FOCUS_STATE_GAIN_MEDIA_ONLY
@@ -176,9 +197,29 @@ class AudioLink(
             sendControl(MSG_FOCUS_REQUEST, Protobuf.varintField(1, FOCUS_GAIN.toLong()))
             GearslipLog.i("$tag: -> AudioFocusRequest(GAIN); waiting for the head unit to hand the sink over")
         }
-        // Some head units grant the sink silently and never answer. Do not let that be the end of
-        // it: start anyway, and let the acks say whether anything is being taken.
-        startStream()
+        if (!asksFocus || focusGranted) {
+            startStream()
+            return
+        }
+        // Wait for the car's answer before streaming, as Android Auto does: a sink that hasn't
+        // been handed over may still be draining the car's own source, and this one (2019 GM)
+        // took audio at a quarter of real time without focus. Some head units grant the sink
+        // silently and never answer, so after FOCUS_WAIT_MS ask once more and start anyway.
+        focusAskedAt = System.currentTimeMillis()
+        app.seb3thehacker.gearslip.SessionReport.audioFocus("never answered")
+        focusTimer?.interrupt()
+        focusTimer = Thread({
+            try {
+                Thread.sleep(FOCUS_WAIT_MS)
+            } catch (e: InterruptedException) {
+                return@Thread
+            }
+            if (!ready || started || focusGranted || !focusRequested) return@Thread
+            GearslipLog.w("$tag: no AudioFocusResponse after ${FOCUS_WAIT_MS}ms - asking again and streaming anyway")
+            runCatching { sendControl(MSG_FOCUS_REQUEST, Protobuf.varintField(1, FOCUS_GAIN.toLong())) }
+            app.seb3thehacker.gearslip.SessionReport.audioFocus("never answered - streamed without it")
+            startStream()
+        }, "gearslip-audio-focus").apply { isDaemon = true; start() }
     }
 
     private fun startStream() {
@@ -189,6 +230,11 @@ class AudioLink(
         )
         inFlight = 0
         lastAckAt = System.currentTimeMillis()
+        firstChunkAt = 0L
+        firstAckLogged = false
+        acks = 0
+        framesAcked = 0
+        maxAckGapMs = 0L
         if (aacSink && aac == null) {
             aac = runCatching { AacEncoder(sampleRate, channels, adts = service.codecType == ServiceDiscovery.CODEC_AAC_LC_ADTS) }
                 .onSuccess { GearslipLog.i("$tag: the car takes ${service.codecName} only - encoding to AAC") }
@@ -200,7 +246,16 @@ class AudioLink(
     }
 
     override fun stop() {
-        if (!started) return
+        focusTimer?.interrupt()
+        focusTimer = null
+        if (!started) {
+            // Asked for focus but never started: still give the request back.
+            if (focusRequested) {
+                runCatching { sendControl(MSG_FOCUS_REQUEST, Protobuf.varintField(1, FOCUS_RELEASE.toLong())) }
+                focusRequested = false
+            }
+            return
+        }
         started = false
         synchronized(ackLock) { ackLock.notifyAll() }
         runCatching {
@@ -270,6 +325,7 @@ class AudioLink(
             return
         }
         synchronized(ackLock) { inFlight++ }
+        if (chunks == 0) firstChunkAt = System.currentTimeMillis()
         chunks++
         bytes += payload.size
         // The first chunk proves the whole path; after that, an occasional line is enough to show
@@ -277,9 +333,20 @@ class AudioLink(
         if (chunks == 1 || chunks % CHUNK_LOG_EVERY == 0) {
             GearslipLog.i(
                 "$tag: -> $chunks chunks / $bytes bytes, inFlight=$inFlight/$maxUnacked, " +
-                    "dropped=$dropped, focus=${if (focusGranted) "granted" else "not granted"}",
+                    "dropped=$dropped, focus=${if (focusGranted) "granted" else "not granted"}, " +
+                    "acks=$acks covering $framesAcked, longest ack gap ${maxAckGapMs}ms, " +
+                    "car took ${"%.0f".format(drainPercent())}% of real time",
             )
         }
+    }
+
+    /** Audio the car acked, as a share of the wall-clock time since the first chunk. */
+    private fun drainPercent(): Double {
+        val elapsed = System.currentTimeMillis() - firstChunkAt
+        if (firstChunkAt == 0L || elapsed <= 0) return 0.0
+        val bytesPerFrame = 2 * channels
+        val chunkMs = if (chunks == 0) 0.0 else (bytes.toDouble() / chunks) / bytesPerFrame / sampleRate * 1000
+        return framesAcked * chunkMs * 100 / elapsed
     }
 
     fun close() {
@@ -313,6 +380,7 @@ class AudioLink(
         private const val STALL_MS = 2_000L
         private const val CHUNK_LOG_EVERY = 200 // about every four seconds
         private const val CONFIG_WAIT_MS = 1_000L
+        private const val FOCUS_WAIT_MS = 2_000L
 
         // AudioFocusStateNotification.AudioFocusState in aasdk.
         private val FOCUS_STATES = mapOf(
