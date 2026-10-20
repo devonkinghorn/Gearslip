@@ -34,6 +34,7 @@ import app.seb3thehacker.gearslip.car.Prefetch
 import app.seb3thehacker.gearslip.stats.UsageStats
 import app.seb3thehacker.gearslip.ui.GearslipApp
 import app.seb3thehacker.gearslip.ui.GearslipTheme
+import app.seb3thehacker.gearslip.wireless.AutoStart
 import java.io.FileInputStream
 import java.io.FileOutputStream
 
@@ -122,6 +123,92 @@ class GearslipActivity : ComponentActivity(), Projection {
         if (result.resultCode != RESULT_OK) GearslipLog.w("calls: call screening role declined")
     }
 
+    /** wifihold-6: the system "let Gearslip watch for this car" (CompanionDeviceManager) dialog. */
+    @Volatile private var associating: String? = null
+    private val associationConsent = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        val address = associating ?: return@registerForActivityResult
+        associating = null
+        if (result.resultCode == RESULT_OK) {
+            GearslipLog.i("car $address associated - Android will start Gearslip when it connects", "AUTO")
+            AutoStart.startObserving(this, address)
+        } else {
+            GearslipLog.w("car association for $address declined - auto-start falls back to Bluetooth broadcasts", "AUTO")
+        }
+    }
+
+    private fun associateCar(address: String) {
+        val cdm = getSystemService(android.companion.CompanionDeviceManager::class.java)
+        if (cdm == null) {
+            GearslipLog.w("no companion device manager on this phone", "AUTO")
+            return
+        }
+        AutoStart.markAssociationOffered(this, address)
+        if (AutoStart.isAssociated(this, address)) {
+            GearslipLog.i("car $address is already associated", "AUTO")
+            AutoStart.startObserving(this, address)
+            return
+        }
+        val request = android.companion.AssociationRequest.Builder()
+            .addDeviceFilter(android.companion.BluetoothDeviceFilter.Builder().setAddress(address).build())
+            .setSingleDevice(true)
+            .build()
+        associating = address
+        fun launch(sender: android.content.IntentSender) {
+            GearslipLog.i("asking to associate car $address", "AUTO")
+            associationConsent.launch(androidx.activity.result.IntentSenderRequest.Builder(sender).build())
+        }
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                cdm.associate(request, mainExecutor, object : android.companion.CompanionDeviceManager.Callback() {
+                    override fun onAssociationPending(intentSender: android.content.IntentSender) = launch(intentSender)
+                    override fun onAssociationCreated(associationInfo: android.companion.AssociationInfo) {
+                        GearslipLog.i("association ${associationInfo.id} created for $address", "AUTO")
+                        AutoStart.startObserving(this@GearslipActivity, address)
+                    }
+                    override fun onFailure(error: CharSequence?) {
+                        GearslipLog.w("car association failed: $error", "AUTO")
+                    }
+                })
+            } else {
+                @Suppress("DEPRECATION")
+                cdm.associate(request, object : android.companion.CompanionDeviceManager.Callback() {
+                    @Deprecated("API 31-32")
+                    override fun onDeviceFound(intentSender: android.content.IntentSender) = launch(intentSender)
+                    override fun onFailure(error: CharSequence?) {
+                        GearslipLog.w("car association failed: $error", "AUTO")
+                    }
+                }, null)
+            }
+        } catch (e: Exception) {
+            GearslipLog.e("couldn't start the car association", e, "AUTO")
+        }
+    }
+
+    /** Once per known car: explain, then show the system association dialog. */
+    private fun offerAssociation() {
+        if (AutoStart.busy()) return
+        val car = AutoStart.carToOfferAssociation(this) ?: return
+        AutoStart.markAssociationOffered(this, car.address)
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Start Android Auto by itself in ${car.name}?")
+            .setMessage(
+                "Gearslip connected wirelessly to ${car.name}. To start it automatically whenever your phone " +
+                    "connects to this car's Bluetooth - even with Gearslip closed - let Gearslip watch for the car " +
+                    "on the next screen. You can turn auto-start off in Settings > Connection.",
+            )
+            .setPositiveButton("Continue") { _, _ -> associateCar(car.address) }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    /** An automatic start that got the car's socket before this screen was up. */
+    private fun pickUpPendingSocket() {
+        if (runner != null) return
+        app.seb3thehacker.gearslip.wireless.WirelessLink.takePendingSocket()?.let { startWireless(it) }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Location, calendar, the phone/contacts group, and the microphone are asked for one at
@@ -187,6 +274,12 @@ class GearslipActivity : ComponentActivity(), Projection {
 
         registerReceiver(detachReceiver, IntentFilter(UsbManager.ACTION_USB_ACCESSORY_DETACHED), RECEIVER_NOT_EXPORTED)
         handleIntent(intent)
+        // wifihold-6: auto-start on known cars.
+        AutoStart.init(this)
+        AutoStart.requestAssociation = { address -> runOnUiThread { associateCar(address) } }
+        pickUpPendingSocket()
+        AutoStart.rearm(this)
+        if (!AutoStart.busy()) AutoStart.checkAlreadyConnected(this, "Gearslip opened")
     }
 
     // The manifest opts out of recreation on uiMode changes, so a light/dark switch on the phone
@@ -206,6 +299,7 @@ class GearslipActivity : ComponentActivity(), Projection {
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             CarAudio.micAllowed()
         }
+        offerAssociation()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -216,6 +310,7 @@ class GearslipActivity : ComponentActivity(), Projection {
     override fun onDestroy() {
         super.onDestroy()
         app.seb3thehacker.gearslip.wireless.WirelessLink.onConnected = null
+        AutoStart.requestAssociation = null
         runCatching { unregisterReceiver(detachReceiver) }
         PhoneMirror.onStartRequested = null
         PhoneMirror.onTokenReady = null
@@ -304,6 +399,17 @@ class GearslipActivity : ComponentActivity(), Projection {
     }
 
     private fun handleIntent(intent: Intent?) {
+        if (intent?.action == AutoStart.ACTION_AUTO_WIRELESS) {
+            GearslipLog.i("opened for an automatic wireless start (${intent.getStringExtra(AutoStart.EXTRA_ADDRESS)})", "AUTO")
+            AutoStart.cancelTapNotification(this)
+            pickUpPendingSocket()
+            // Tapped the notification after the service gave up: start again.
+            val address = intent.getStringExtra(AutoStart.EXTRA_ADDRESS)
+            if (address != null && runner == null && !AutoStart.busy()) {
+                AutoStart.onCarConnected(this, address, "notification tapped")
+            }
+            return
+        }
         if (intent?.action != UsbManager.ACTION_USB_ACCESSORY_ATTACHED) return
         // Switched off in Settings: the system shouldn't route the car here at all, but if it
         // does, leave the accessory alone.

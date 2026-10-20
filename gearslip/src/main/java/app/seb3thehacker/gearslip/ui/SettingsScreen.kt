@@ -196,6 +196,57 @@ private fun ConnectionSection() {
             icon = Icons.Filled.Settings,
             trailing = { Switch(checked = enabled, onCheckedChange = null) },
         )
+        SettingsDivider()
+        AutoStartRows()
+    }
+}
+
+/** wifihold-6: auto-start wireless Android Auto when a known car connects over Bluetooth. */
+@Composable
+private fun AutoStartRows() {
+    val context = LocalContext.current
+    val auto = app.seb3thehacker.gearslip.wireless.AutoStart
+    var on by remember { mutableStateOf(auto.enabled(context)) }
+    val cars by auto.cars.collectAsState()
+    SettingsRow(
+        "Auto-start on known cars",
+        Modifier.toggleable(on, role = Role.Switch) {
+            on = it
+            auto.setEnabled(context, it)
+        },
+        subtitle = if (on) "Wireless Android Auto starts by itself when a car you've used connects over Bluetooth"
+        else "Off: start wireless Android Auto by hand",
+        icon = Icons.Filled.Refresh,
+        trailing = { Switch(checked = on, onCheckedChange = null) },
+    )
+    if (cars.isEmpty()) {
+        SettingsDivider()
+        SettingsRow(
+            "No known cars yet",
+            subtitle = "Connect wirelessly once by hand; Gearslip remembers the car when video starts",
+        )
+    }
+    for (car in cars) {
+        SettingsDivider()
+        var tick by remember { mutableIntStateOf(0) }
+        val associated = remember(tick, car.address) { auto.isAssociated(context, car.address) }
+        val canAssociate = auto.companionAvailable(context)
+        SettingsRow(
+            car.name,
+            Modifier.clickable(enabled = !associated && canAssociate) {
+                auto.requestAssociation?.invoke(car.address)
+                tick++
+            },
+            subtitle = when {
+                associated -> "${car.address} - starts in the background (car associated)"
+                canAssociate -> "${car.address} - tap to let Android start Gearslip in the background for this car"
+                else -> "${car.address} - Bluetooth broadcasts only"
+            },
+            icon = Icons.Filled.Settings,
+            trailing = {
+                androidx.compose.material3.TextButton(onClick = { auto.forget(context, car.address) }) { Text("Forget") }
+            },
+        )
     }
 }
 

@@ -87,6 +87,13 @@
     <uses-permission android:name="android.car.permission.TEMPLATE_RENDERER" />
 
     <uses-feature android:name="android.hardware.usb.accessory" android:required="true" />
+    <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
+
+    <!-- wifihold-6: auto-start wireless Android Auto when a known car connects over Bluetooth. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_RUN_IN_BACKGROUND" />
+    <uses-permission android:name="android.permission.REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND" />
 
     <queries>
     <!-- Named directly: current builds have no launcher-category entry point for the MAIN/
@@ -137,6 +144,33 @@
                 android:resource="@xml/share_paths" />
         </provider>
 
+
+        <!-- wifihold-6: auto-start on known cars. -->
+        <service
+            android:name=".wireless.AutoStartService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+        <service
+            android:name=".wireless.CarPresenceService"
+            android:exported="true"
+            android:permission="android.permission.BIND_COMPANION_DEVICE_SERVICE">
+            <intent-filter>
+                <action android:name="android.companion.CompanionDeviceService" />
+            </intent-filter>
+        </service>
+        <receiver
+            android:name=".wireless.CarBluetoothReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+                <action android:name="android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED" />
+                <action android:name="android.bluetooth.headset.profile.action.CONNECTION_STATE_CHANGED" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!--
           singleTop: the head unit can re-attach while we are already foregrounded, which

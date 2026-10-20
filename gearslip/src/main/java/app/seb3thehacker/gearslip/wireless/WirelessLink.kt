@@ -49,6 +49,8 @@ import java.util.UUID
  * aasdk's aaw protos.
  */
 object WirelessLink {
+    private const val PENDING_MAX_MS = 60_000L
+
 
     private val log = GearslipLog.tagged("AAW")
 
@@ -78,6 +80,31 @@ object WirelessLink {
     /** Set by the activity: starts a session on the car's socket. */
     @Volatile var onConnected: ((Socket) -> Unit)? = null
 
+    /** wifihold-6: the car being started up, for [AutoStart] to remember once it projects. */
+    @Volatile var currentDevice: BluetoothDevice? = null
+        private set
+
+    /** wifihold-6: a car socket that arrived with no screen to take it (auto-start in the background). */
+    @Volatile private var pendingSocket: Socket? = null
+    @Volatile private var pendingAt = 0L
+
+    /** True while a start-up runs or the car's socket is open. */
+    val busy: Boolean
+        get() = worker?.isAlive == true || tcp?.isClosed == false
+
+    /** The socket held for a screen that wasn't there yet, if still fresh; taken once. */
+    fun takePendingSocket(): Socket? {
+        val s = pendingSocket ?: return null
+        pendingSocket = null
+        if (System.currentTimeMillis() - pendingAt > PENDING_MAX_MS || s.isClosed) {
+            log.w("TCP: the held socket went stale before Gearslip's screen came up")
+            runCatching { s.close() }
+            return null
+        }
+        log.i("TCP: Gearslip's screen is up - handing it the held socket")
+        return s
+    }
+
     @Volatile private var rfcomm: BluetoothSocket? = null
     @Volatile private var listener: BluetoothServerSocket? = null
     @Volatile private var tcp: Socket? = null
@@ -106,6 +133,7 @@ object WirelessLink {
     fun start(context: Context, device: BluetoothDevice) {
         stop(context, "starting a new wireless start-up")
         val app = context.applicationContext
+        currentDevice = device
         worker = Thread({
             // A test feature: anything unexpected ends the attempt, not the app.
             try {
@@ -133,6 +161,8 @@ object WirelessLink {
         rfcomm = null
         runCatching { tcp?.close() }
         tcp = null
+        pendingSocket?.let { runCatching { it.close() } }
+        pendingSocket = null
         network?.let { cb ->
             log.i("Wi-Fi: releasing the car's network request ($reason)")
             runCatching { context.getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(cb) }
@@ -521,8 +551,12 @@ object WirelessLink {
                 log.i("TCP: connected to $ip:$port (try ${attempt + 1})")
                 val start = onConnected
                 if (start == null) {
-                    log.w("TCP: connected, but nothing is waiting for the socket")
-                    socket.close()
+                    // wifihold-6: an automatic start in the background can get here before Android
+                    // lets Gearslip's screen open. Hold the socket for it instead of dropping the car.
+                    log.w("TCP: connected, but Gearslip's screen isn't up yet - holding the socket for ${PENDING_MAX_MS / 1000}s")
+                    pendingSocket = socket
+                    pendingAt = System.currentTimeMillis()
+                    AutoStartService.screenNeeded(context)
                 } else {
                     start(socket)
                 }

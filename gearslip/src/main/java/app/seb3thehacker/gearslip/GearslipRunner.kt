@@ -825,6 +825,8 @@ class GearslipRunner(
         }
         CarFocus.request = ::requestNativeFocus
         videoStartedAt = System.currentTimeMillis()
+        // wifihold-6: a car that got this far starts Gearslip by itself next time.
+        if (wireless) runCatching { app.seb3thehacker.gearslip.wireless.AutoStart.onWirelessSessionWorked() }
         SessionReport.videoStart(how)
         if (how.startsWith("started without")) log.w("video: $how") else log.i("PHASE A COMPLETE - video focus granted; starting video source")
         startVideoSource()
