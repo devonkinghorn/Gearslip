@@ -74,6 +74,9 @@ class GearslipRunner(
     @Volatile private var carGear: Int? = null
     /** Set once the phone has asked for the car's screen; the focus timer works from it. */
     @Volatile private var videoFocusAskedAt = 0L
+    /** A VideoFocusNotification that arrived before Config, applied once Config picks the resolution. */
+    @Volatile private var pendingFocusMode: Int? = null
+    @Volatile private var focusRequestSent = false
     private val videoStartLock = Any()
     private var videoSource: VideoSource? = null
     @Volatile private var inFlight = 0
@@ -724,6 +727,7 @@ class GearslipRunner(
         // VideoFocusRequestNotification { mode = 2; reason = 3 }
         val focus = Protobuf.varintField(2, VIDEO_FOCUS_PROJECTED.toLong()) +
             Protobuf.varintField(3, 1L)
+        focusRequestSent = true
         send(MSG_VIDEO_FOCUS_REQUEST, focus, encrypted = true, channel = videoChannelId)
         log.i("-> VideoFocusRequest(mode=PROJECTED)")
     }
@@ -737,6 +741,11 @@ class GearslipRunner(
     private fun armVideoFocusTimer() {
         Thread({
             try {
+                Thread.sleep(VIDEO_FOCUS_UNSOLICITED_WAIT_MS)
+                if (!running || videoStarted) return@Thread
+                log.w("the car sent no VideoFocusNotification of its own in ${VIDEO_FOCUS_UNSOLICITED_WAIT_MS}ms (gear ${carGear?.let(::gearName) ?: "unknown"}) - asking for it")
+                videoFocusAskedAt = System.currentTimeMillis()
+                sendVideoFocusRequest()
                 Thread.sleep(VIDEO_FOCUS_RETRY_MS)
                 if (!running || videoStarted) return@Thread
                 log.w("no VideoFocusNotification ${VIDEO_FOCUS_RETRY_MS}ms after asking (gear ${carGear?.let(::gearName) ?: "unknown"}) - asking again")
@@ -1001,8 +1010,16 @@ class GearslipRunner(
                 if (videoFocusAskedAt == 0L) {
                     videoFocusAskedAt = System.currentTimeMillis()
                     if (carGear == GEAR_REVERSE) log.w("the car is in REVERSE - its camera has the screen, so video focus may wait until it shifts out")
-                    sendVideoFocusRequest()
-                    armVideoFocusTimer()
+                    // Android Auto doesn't ask: it waits for the car's unsolicited
+                    // VideoFocusNotification (the GM unit sent one ~1.5 s after setup). Do the same,
+                    // and only ask if none has come after VIDEO_FOCUS_UNSOLICITED_WAIT_MS.
+                    if (pendingFocusMode != null) {
+                        log.i("the car already granted video focus before Config - starting now")
+                        onVideoFocus(pendingFocusMode!!)
+                    } else {
+                        log.i("waiting up to ${VIDEO_FOCUS_UNSOLICITED_WAIT_MS}ms for the car's own VideoFocusNotification, as Android Auto does")
+                        armVideoFocusTimer()
+                    }
                 } else {
                     sendVideoFocusRequest()
                 }
@@ -1013,7 +1030,13 @@ class GearslipRunner(
                 val fields = Wire.fields(body)
                 val mode = Wire.varint(fields, 1)?.toInt() ?: VIDEO_FOCUS_PROJECTED
                 log.i("<- VideoFocusNotification: mode=$mode unsolicited=${Wire.varint(fields, 2)}")
-                onVideoFocus(mode)
+                if (!videoStarted && selectedConfigIndex == null) {
+                    // Before Config there's no chosen resolution yet: hold it until Config arrives.
+                    pendingFocusMode = mode
+                    log.i("video focus came before Config - holding it until Config")
+                } else {
+                    onVideoFocus(mode)
+                }
             }
 
             // Not in aasdk's direction of travel, but LIVI sends it: log what it asks for.
@@ -1130,9 +1153,16 @@ class GearslipRunner(
      * minute on LIVI, at 5-12 fps). Waiting here holds the encoder back instead, which simply
      * makes it produce fewer frames, each one whole.
      */
-    private fun sendVideoFrame(data: ByteArray, presentationTimeUs: Long, keyFrame: Boolean) {
+    private fun sendVideoFrame(frame: ByteArray, presentationTimeUs: Long, keyFrame: Boolean) {
         // The car is showing its own screen and would throw these away.
         if (!videoProjected) return
+        // Android Auto's keyframes start straight at the IDR slice (00 00 00 01 65); SPS/PPS go
+        // only in the separate CodecConfig. Some encoders repeat them in front of each keyframe.
+        val csd = lastCodecConfig
+        val data = if (keyFrame && csd != null && frame.size > csd.size &&
+            frame.copyOfRange(0, csd.size).contentEquals(csd)
+        ) frame.copyOfRange(csd.size, frame.size) else frame
+        if (framesSent < 3) log.hex("   frame #${framesSent + 1} head${if (data !== frame) " (inline SPS/PPS removed)" else ""}", data, limit = 16)
         synchronized(ackLock) {
             val waitStart = System.currentTimeMillis()
             while (running && inFlight >= maxUnacked) {
@@ -1193,7 +1223,10 @@ class GearslipRunner(
             // The head unit repeats this while it waits for frames; only start once.
             if (!projected) return
             val asked = videoFocusAskedAt
-            beginVideo("car granted focus${if (asked > 0) " ${System.currentTimeMillis() - asked}ms after the request" else ""}")
+            beginVideo(
+                if (focusRequestSent) "car granted focus${if (asked > 0) " ${System.currentTimeMillis() - asked}ms after the request" else ""}"
+                else "car granted focus unasked${if (asked > 0) " ${System.currentTimeMillis() - asked}ms after Config" else ""}, as with Android Auto",
+            )
             return
         }
         if (projected == videoProjected) return
@@ -1285,16 +1318,19 @@ class GearslipRunner(
         try {
             writer.execute {
                 try {
-                    if (payload.size <= Frames.MAX_FRAME_PAYLOAD) {
+                    if (payload.size <= Frames.FIRST_PIECE_PLAIN) {
                         val framePayload = if (encrypted) tls.encrypt(payload) else payload
                         output.write(Frames.build(channel, encrypted, framePayload, messageType))
                     } else {
-                        // Split exactly as aasdk does: chunk the *plaintext*, encrypt each chunk
-                        // separately, and carry the total plaintext length in the FIRST frame.
-                        // Video keyframes for anything busier than a test card exceed 16 KB routinely.
+                        // Chunk the *plaintext*, encrypt each chunk separately, and carry the total
+                        // plaintext length in the FIRST frame. Piece sizes match a real phone's
+                        // (16120 then 16124) so no encrypted frame exceeds 16 KB; the old 0x4000
+                        // pieces became 16413-byte frames, and the 2019 GM unit dropped the link
+                        // within 0.4 s of the first keyframe that needed splitting.
                         var offset = 0
                         while (offset < payload.size) {
-                            val size = minOf(Frames.MAX_FRAME_PAYLOAD, payload.size - offset)
+                            val limit = if (offset == 0) Frames.FIRST_PIECE_PLAIN else Frames.NEXT_PIECE_PLAIN
+                            val size = minOf(limit, payload.size - offset)
                             val chunk = payload.copyOfRange(offset, offset + size)
                             val frameType = when {
                                 offset == 0 -> Frames.TYPE_FIRST
@@ -1462,6 +1498,7 @@ class GearslipRunner(
         private const val GEAR_PARK = 101
         private const val GEAR_REVERSE = 102
         private const val VIDEO_FOCUS_RETRY_MS = 1_000L
+        private const val VIDEO_FOCUS_UNSOLICITED_WAIT_MS = 2_500L
         private const val VIDEO_FOCUS_GIVE_UP_MS = 5_000L
         private const val SENSOR_LOG_EVERY_MS = 10_000L
 
@@ -1471,7 +1508,8 @@ class GearslipRunner(
         const val VIDEO_FOCUS_NATIVE = 2
         const val VIDEO_FOCUS_PROJECTED_NO_INPUT = 4
         const val VIDEO_FOCUS_REASON_LAUNCH_NATIVE = 2
-        const val SESSION_ID = 1
+        /** Video session id. Android Auto itself uses 0 (Start 08 00 10 00; the car acks 08 00 10 01). */
+        const val SESSION_ID = 0
         const val MSG_INPUT_REPORT = 32769
         const val MSG_KEY_BINDING_REQUEST = 32770
         const val MSG_KEY_BINDING_RESPONSE = 32771

@@ -39,6 +39,15 @@ object Frames {
     /** aasdk splits at this size (MessageOutStream.hpp:62). Nothing the spike sends is close. */
     const val MAX_FRAME_PAYLOAD = 0x4000
 
+    /**
+     * Plaintext per piece when a message is split (wifihold-3). Cutting at the full 0x4000 made
+     * each encrypted piece 0x4000 + 29 bytes of TLS overhead, so a frame's payload exceeded the
+     * 16 KB a phone ever sends. Real phones cut FIRST at 16120 and MIDDLE/LAST at 16124 (4 more,
+     * since their header is 4 bytes shorter), keeping every frame, header included, under 16 KB.
+     */
+    const val FIRST_PIECE_PLAIN = 16_120
+    const val NEXT_PIECE_PLAIN = 16_124
+
     class Frame(
         val channel: Int,
         val frameType: Int,
