@@ -593,6 +593,7 @@ class GearslipRunner(
             tag = "guidance",
             sessionId = GUIDANCE_SESSION_ID,
             asksFocus = false,
+            paced = false, // DirectionsVoice paces its own 20 ms chunks
             onReady = { DirectionsVoice.attach(it) },
             onClose = { DirectionsVoice.detach(it) },
         )

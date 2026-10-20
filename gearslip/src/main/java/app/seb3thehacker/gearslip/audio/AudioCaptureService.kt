@@ -243,7 +243,9 @@ class AudioCaptureService : Service() {
         private const val EXTRA_RESULT_DATA = "resultData"
 
         /** About 21 ms of 48 kHz stereo: small enough for lip-sync, big enough not to flood the link. */
-        private const val CHUNK_BYTES = 4096
+        // wifihold-5: reads match the 8 KB chunks the car gets; the loop now only queues (the paced
+        // sender in AudioLink waits on the car), so AudioRecord no longer overruns behind a blocked send.
+        private const val CHUNK_BYTES = 8192
         /** About half a second: room to wait out a slow ack from the car without losing sound. */
         private const val BUFFER_CHUNKS = 24
         private const val LEVEL_LOG_MS = 3_000L

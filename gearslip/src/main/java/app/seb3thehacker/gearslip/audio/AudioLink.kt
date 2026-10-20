@@ -31,6 +31,11 @@ class AudioLink(
     private val onClose: (AudioLink) -> Unit = { CarAudio.detach(it) },
     /** The car took the sound back after giving it, as when the driver switches to the radio. */
     private val onTakenBack: () -> Unit = {},
+    /**
+     * wifihold-5: media goes through a jitter queue and its own paced sender thread, in 8 KB
+     * chunks with sample-clock timestamps. Directions pace themselves, so they keep the direct path.
+     */
+    private val paced: Boolean = true,
 ) : CarAudio.Link {
 
     private var configIndex = 0
@@ -56,6 +61,29 @@ class AudioLink(
     private var firstAckLogged = false
     private var maxAckGapMs = 0L
     private val ackLock = Object()
+
+    // --- wifihold-5 paced media path -------------------------------------------------------
+    // Why: the 2019 GM unit acked exactly one MediaAck (ack=1) per TWO 4 KB chunks (495 acks for
+    // 1000 chunks, steady at 49.5%). The rest were never acked, so the 16-chunk window only
+    // reopened through the 2 s stall reset; the capture thread was the one blocked in send(), so
+    // AudioRecord overran meanwhile and the car got ~25% of real time: choppy audio.
+    /** Chunks sent and not yet acked or expired, by send time (oldest first). Guarded by ackLock. */
+    private val sentAt = ArrayDeque<Long>()
+    /** Chunks one MediaAck stands for on this car, learned from the ack/chunk ratio. */
+    @Volatile private var ackScale = 1
+    private var rawAcksForScale = 0
+    private var chunksForScale = 0
+    private var expired = 0
+    private val queue = ArrayDeque<ByteArray>()
+    private val queueLock = Object()
+    private var rechunk = java.io.ByteArrayOutputStream()
+    private var queueDrops = 0
+    private var rebases = 0
+    @Volatile private var sender: Thread? = null
+    @Volatile private var senderGen = 0
+    private var streamBaseUs = 0L
+    private var streamBaseWallMs = 0L
+    private var samplesSent = 0L
     /** Only for a sink that takes AAC and nothing else; PCM sinks get the capture as it is. */
     @Volatile private var aac: AacEncoder? = null
     private val aacSink get() = service.codecType == ServiceDiscovery.CODEC_AAC_LC || service.codecType == ServiceDiscovery.CODEC_AAC_LC_ADTS
@@ -148,10 +176,16 @@ class AudioLink(
                 val now = System.currentTimeMillis()
                 synchronized(ackLock) {
                     if (lastAckAt > 0 && acks > 0) maxAckGapMs = maxOf(maxAckGapMs, now - lastAckAt)
-                    inFlight = maxOf(0, inFlight - acked)
+                    if (paced) {
+                        rawAcksForScale += acked
+                        repeat(acked * ackScale) { sentAt.removeFirstOrNull() }
+                        inFlight = sentAt.size
+                    } else {
+                        inFlight = maxOf(0, inFlight - acked)
+                    }
                     lastAckAt = now
                     acks++
-                    framesAcked += acked
+                    framesAcked += acked * (if (paced) ackScale else 1)
                     ackLock.notifyAll()
                 }
                 if (!firstAckLogged && started) {
@@ -259,11 +293,122 @@ class AudioLink(
         }
         started = true
         GearslipLog.i("$tag: -> Start(session=$sessionId, config=$configIndex) - streaming ${sampleRate}Hz x$channels")
+        if (paced) startSender()
+    }
+
+    private val frameBytes get() = 2 * channels
+    /** 2048 sample frames per chunk: 8192 bytes at 48 kHz stereo (42.7 ms), still one AA frame. */
+    private val chunkBytes get() = CHUNK_FRAMES * frameBytes
+    private val chunkMs get() = CHUNK_FRAMES * 1000.0 / sampleRate
+
+    private fun startSender() {
+        synchronized(ackLock) { sentAt.clear(); inFlight = 0 }
+        synchronized(queueLock) { queue.clear(); rechunk = java.io.ByteArrayOutputStream() }
+        ackScale = 1; rawAcksForScale = 0; chunksForScale = 0; expired = 0; queueDrops = 0; rebases = 0
+        samplesSent = 0
+        streamBaseUs = System.nanoTime() / 1_000
+        streamBaseWallMs = System.currentTimeMillis()
+        GearslipLog.i("$tag: paced sender: ${chunkBytes}-byte chunks (${"%.1f".format(chunkMs)} ms), jitter queue up to ${QUEUE_MAX_MS} ms, window $maxUnacked, lead up to ${MAX_LEAD_MS} ms")
+        val gen = ++senderGen
+        val t = Thread({ senderLoop(gen) }, "gearslip-$tag-sender").apply {
+            isDaemon = true
+            priority = Thread.MAX_PRIORITY
+        }
+        sender = t
+        t.start()
+    }
+
+    /** Called by the capture thread: never blocks on the car, only queues. */
+    private fun enqueue(chunk: ByteArray) {
+        synchronized(queueLock) {
+            val maxChunks = maxOf(4, (QUEUE_MAX_MS / chunkMs).toInt())
+            while (queue.size >= maxChunks) {
+                queue.removeFirst()
+                if (queueDrops++ % 50 == 0) GearslipLog.w("$tag: jitter queue full (${queue.size + 1} chunks) - dropped the oldest ($queueDrops so far)")
+            }
+            queue.addLast(chunk)
+            queueLock.notifyAll()
+        }
+    }
+
+    /** Frees chunks the car must have played by now even though it never acked them. */
+    private fun expireLocked(now: Long) {
+        val limit = (chunkMs * maxUnacked).toLong() + EXPIRE_GRACE_MS
+        while (sentAt.isNotEmpty() && now - sentAt.first() > limit) {
+            sentAt.removeFirst()
+            expired++
+        }
+        inFlight = sentAt.size
+    }
+
+    private fun senderLoop(gen: Int) {
+        try {
+            while (started && gen == senderGen) {
+                val chunk = synchronized(queueLock) {
+                    while (started && queue.isEmpty()) queueLock.wait(50)
+                    queue.removeFirstOrNull()
+                } ?: continue
+                // Window: wait for an ack, or for the oldest unacked chunk to age out.
+                synchronized(ackLock) {
+                    expireLocked(System.currentTimeMillis())
+                    while (started && sentAt.size >= maxUnacked) {
+                        ackLock.wait(10)
+                        expireLocked(System.currentTimeMillis())
+                    }
+                }
+                if (!started) break
+                // Real-time pacing on the sample clock: never more than MAX_LEAD_MS ahead of the
+                // wall clock; after a gap (nothing captured) move the clock forward instead of
+                // racing to catch up.
+                val streamMs = samplesSent * 1000 / sampleRate
+                val lead = streamMs - (System.currentTimeMillis() - streamBaseWallMs)
+                if (lead > MAX_LEAD_MS) Thread.sleep(lead - MAX_LEAD_MS)
+                if (lead < -REBASE_MS) {
+                    val behindMs = -lead
+                    samplesSent += behindMs * sampleRate / 1000
+                    if (rebases++ % 20 == 0) GearslipLog.w("$tag: capture fell ${behindMs} ms behind real time - moving the timeline forward ($rebases times)")
+                }
+                send(chunk, CHUNK_FRAMES_OF(chunk))
+                maybeLearnAckScale()
+            }
+        } catch (_: InterruptedException) {
+        } catch (t: Throwable) {
+            GearslipLog.e("$tag: paced sender failed", t)
+        }
+    }
+
+    private fun CHUNK_FRAMES_OF(chunk: ByteArray): Int = if (aac != null) AAC_FRAME_SAMPLES else chunk.size / frameBytes
+
+    /**
+     * How many chunks one MediaAck stands for. Gearslip assumed one; the 2019 GM unit acks one per
+     * two 4 KB chunks. Checked every 64 chunks once the window has filled at least once.
+     */
+    private fun maybeLearnAckScale() {
+        chunksForScale++
+        if (chunksForScale < 64) return
+        val raw = rawAcksForScale
+        val ratio = if (raw > 0) chunksForScale.toDouble() / raw else 0.0
+        val scale = when {
+            raw == 0 -> ackScale
+            ratio > 3.6 -> ackScale // way off: leave it, expiry keeps the window moving
+            ratio > 2.6 -> 3
+            ratio > 1.6 -> 2
+            else -> 1
+        }
+        if (scale != ackScale) {
+            GearslipLog.w("$tag: the car acks ${"%.2f".format(ratio)} chunks per MediaAck - counting each ack as $scale chunks (was $ackScale)")
+            ackScale = scale
+        }
+        chunksForScale = 0
+        rawAcksForScale = 0
     }
 
     override fun stop() {
         focusTimer?.interrupt()
         focusTimer = null
+        synchronized(queueLock) { queue.clear(); queueLock.notifyAll() }
+        senderGen++
+        sender = null
         if (!started) {
             // Asked for focus but never started: still give the request back.
             if (focusRequested) {
@@ -291,7 +436,25 @@ class AudioLink(
         if (!started) return
         val encoder = aac
         if (encoder == null) {
-            send(pcm.copyOf(size))
+            if (!paced) {
+                send(pcm.copyOf(size))
+                return
+            }
+            // Re-chunk the capture into CHUNK_FRAMES-sized pieces for the sender thread.
+            val full = ArrayList<ByteArray>()
+            synchronized(queueLock) {
+                rechunk.write(pcm, 0, size)
+                if (rechunk.size() >= chunkBytes) {
+                    val all = rechunk.toByteArray()
+                    var off = 0
+                    while (all.size - off >= chunkBytes) {
+                        full += all.copyOfRange(off, off + chunkBytes)
+                        off += chunkBytes
+                    }
+                    rechunk = java.io.ByteArrayOutputStream().apply { write(all, off, all.size - off) }
+                }
+            }
+            full.forEach(::enqueue)
             return
         }
         val frames = try {
@@ -303,14 +466,14 @@ class AudioLink(
             started = false
             return
         }
-        frames.forEach(::send)
+        if (paced) frames.forEach(::enqueue) else frames.forEach { send(it) }
     }
 
-    /** One Data message, once the car has room for it. */
-    private fun send(payload: ByteArray) {
+    /** One Data message, once the car has room for it. [frames] is set on the paced path. */
+    private fun send(payload: ByteArray, frames: Int = -1) {
         // Wait for the car to catch up rather than throw the chunk away: a dropped chunk is a gap
         // the driver hears, while a short wait is soaked up by the capture buffer behind us.
-        synchronized(ackLock) {
+        if (!paced) synchronized(ackLock) {
             while (started && inFlight >= maxUnacked) {
                 val waited = System.currentTimeMillis() - lastAckAt
                 if (waited > STALL_MS) {
@@ -331,7 +494,9 @@ class AudioLink(
             return
         }
         val timestamp = ByteArray(8)
-        val micros = System.nanoTime() / 1_000
+        // Paced: the sample clock (start + samples sent), evenly spaced by the chunk's length.
+        val micros = if (frames >= 0) streamBaseUs + samplesSent * 1_000_000 / sampleRate else System.nanoTime() / 1_000
+        if (frames >= 0) samplesSent += frames
         for (i in 0 until 8) timestamp[i] = ((micros shr ((7 - i) * 8)) and 0xFF).toByte()
         try {
             sendOnChannel(MSG_DATA, timestamp + payload)
@@ -340,7 +505,9 @@ class AudioLink(
             started = false
             return
         }
-        synchronized(ackLock) { inFlight++ }
+        synchronized(ackLock) {
+            if (paced) { sentAt.addLast(System.currentTimeMillis()); inFlight = sentAt.size } else inFlight++
+        }
         if (chunks == 0) firstChunkAt = System.currentTimeMillis()
         chunks++
         bytes += payload.size
@@ -351,7 +518,8 @@ class AudioLink(
                 "$tag: -> $chunks chunks / $bytes bytes, inFlight=$inFlight/$maxUnacked, " +
                     "dropped=$dropped, focus=${if (focusGranted) "granted" else "not granted"}, " +
                     "acks=$acks covering $framesAcked, longest ack gap ${maxAckGapMs}ms, " +
-                    "car took ${"%.0f".format(drainPercent())}% of real time",
+                    "car took ${"%.0f".format(drainPercent())}% of real time" +
+                    (if (paced) ", ack scale x$ackScale, expired unacked=$expired, queue=${synchronized(queueLock) { queue.size }}, queue drops=$queueDrops, timeline moves=$rebases" else ""),
             )
         }
     }
@@ -397,6 +565,12 @@ class AudioLink(
         private const val CHUNK_LOG_EVERY = 200 // about every four seconds
         private const val CONFIG_WAIT_MS = 1_000L
         private const val FOCUS_WAIT_MS = 2_000L
+        private const val CHUNK_FRAMES = 2048
+        private const val AAC_FRAME_SAMPLES = 1024
+        private const val QUEUE_MAX_MS = 1_000.0
+        private const val MAX_LEAD_MS = 300L
+        private const val REBASE_MS = 500L
+        private const val EXPIRE_GRACE_MS = 400L
 
         // AudioFocusStateNotification.AudioFocusState in aasdk.
         private val FOCUS_STATES = mapOf(
