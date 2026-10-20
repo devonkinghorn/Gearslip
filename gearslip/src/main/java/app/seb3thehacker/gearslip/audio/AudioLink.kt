@@ -190,6 +190,22 @@ class AudioLink(
         if (had && (state == FOCUS_STATE_LOSS || state == FOCUS_STATE_LOSS_TRANSIENT)) onTakenBack()
     }
 
+    /**
+     * wifihold-4: the answer to the session-start AudioFocusRequest the runner sends as Android Auto
+     * does. Before this link has asked for focus itself, it only records the grant (nothing is
+     * playing, so there is nothing to start); afterwards it is the normal [onFocus].
+     */
+    fun onFocusAnswer(state: Int) {
+        if (focusRequested || started) {
+            onFocus(state)
+            return
+        }
+        val name = FOCUS_STATES[state] ?: "unknown($state)"
+        focusGranted = state == FOCUS_STATE_GAIN || state == FOCUS_STATE_GAIN_TRANSIENT ||
+            state == FOCUS_STATE_GAIN_MEDIA_ONLY
+        GearslipLog.i("$tag: <- AudioFocusResponse state=$name (to the session-start request; streaming starts when something plays)")
+    }
+
     override fun start() {
         if (!ready || started) return
         if (asksFocus && !focusRequested) {

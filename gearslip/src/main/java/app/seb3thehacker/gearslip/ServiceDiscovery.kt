@@ -119,6 +119,9 @@ object ServiceDiscovery {
     /** The instrument cluster's turn-by-turn channel (NavigationStatusService, Service field 8). */
     fun findNavStatusChannel(response: ByteArray): Int? = findChannelWith(response, 8)
 
+    /** PhoneStatusService (Service field 10): call state and signal strength. */
+    fun findPhoneStatusChannel(response: ByteArray): Int? = findChannelWith(response, 10)
+
     private fun findChannelWith(response: ByteArray, serviceField: Int): Int? =
         Wire.allBytes(Wire.fields(response), 1).firstNotNullOfOrNull { channel ->
             val service = Wire.fields(channel)

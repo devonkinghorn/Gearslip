@@ -66,8 +66,25 @@ object CarBluetooth {
     /** The car's Bluetooth address, when it named one in its service list. */
     val carAddress: String? get() = car?.service?.carAddress
 
-    /** The car's Bluetooth channel once the driver has asked to pair, -1 otherwise. */
-    val channelId: Int get() = car?.takeIf { pairing }?.service?.serviceId ?: -1
+    /**
+     * wifihold-4: Android Auto opens the Bluetooth channel at every session start and sends a
+     * PairingRequest (its MAC, method 2) before the car hands over its screen. Gearslip now does
+     * the same; the phone only starts bonding when the driver taps Pair.
+     */
+    @Volatile private var openedEarly = false
+    @Volatile private var channelOpen = false
+
+    /** The car's Bluetooth channel once it's open (at session start or after Pair), -1 otherwise. */
+    val channelId: Int get() = car?.takeIf { pairing || openedEarly }?.service?.serviceId ?: -1
+
+    /** Opens the channel and sends the PairingRequest at session start, as Android Auto does. */
+    fun openAtSessionStart() {
+        val c = car ?: return
+        if (openedEarly) return
+        openedEarly = true
+        log.i("-> ChannelOpenRequest on channel ${c.service.serviceId} at session start (as Android Auto does)")
+        c.open()
+    }
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -81,6 +98,8 @@ object CarBluetooth {
     ) {
         car = Car(service, open, send)
         bondStarted = false
+        openedEarly = false
+        channelOpen = false
         log.i("the car offers Bluetooth pairing, methods=${service.pairingMethods}")
         val device = device() ?: return
         when {
@@ -93,6 +112,8 @@ object CarBluetooth {
     fun onCarDisconnected() {
         car = null
         pairing = false
+        openedEarly = false
+        channelOpen = false
         main.post {
             stopWatching()
             _prompt.value = Prompt.NONE
@@ -106,8 +127,12 @@ object CarBluetooth {
         pairing = true
         _prompt.value = Prompt.PAIRING
         watchBonding(device)
-        c.open()
-        log.i("-> ChannelOpenRequest on channel ${c.service.serviceId}")
+        if (channelOpen) {
+            sendPairingRequest(c)
+        } else if (!openedEarly) {
+            c.open()
+            log.i("-> ChannelOpenRequest on channel ${c.service.serviceId}")
+        }
         // If the car never answers on its channel, pair from the phone anyway.
         main.postDelayed({ startBond("the car didn't answer the pairing request") }, CAR_REPLY_WAIT_MS)
         main.postDelayed({
@@ -140,13 +165,8 @@ object CarBluetooth {
                     main.post { startBond("the car wouldn't open its Bluetooth channel") }
                     return
                 }
-                val method = c.service.pairingMethods.firstOrNull { it == METHOD_NUMERIC_COMPARISON }
-                    ?: c.service.pairingMethods.firstOrNull() ?: METHOD_NUMERIC_COMPARISON
-                c.send(
-                    MSG_PAIRING_REQUEST,
-                    Protobuf.stringField(1, phoneAddress()) + Protobuf.varintField(2, method.toLong()),
-                )
-                log.i("-> PairingRequest(method=$method)")
+                channelOpen = true
+                sendPairingRequest(c)
             }
             MSG_PAIRING_RESPONSE -> {
                 val fields = Wire.fields(body)
@@ -158,6 +178,17 @@ object CarBluetooth {
             MSG_AUTHENTICATION_DATA -> log.i("<- AuthenticationData (${body.size} bytes)")
             else -> log.i("<- unhandled message id=$messageId (${body.size} bytes)")
         }
+    }
+
+    private fun sendPairingRequest(c: Car) {
+        val method = c.service.pairingMethods.firstOrNull { it == METHOD_NUMERIC_COMPARISON }
+            ?: c.service.pairingMethods.firstOrNull() ?: METHOD_NUMERIC_COMPARISON
+        val address = phoneAddress()
+        c.send(
+            MSG_PAIRING_REQUEST,
+            Protobuf.stringField(1, address) + Protobuf.varintField(2, method.toLong()),
+        )
+        log.i("-> PairingRequest(method=$method, phone address ${if (address == "02:00:00:00:00:00") "placeholder - Android hides the real one from apps" else "given"})")
     }
 
     @SuppressLint("MissingPermission")

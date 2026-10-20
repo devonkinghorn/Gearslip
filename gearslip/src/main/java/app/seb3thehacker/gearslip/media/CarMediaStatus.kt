@@ -45,6 +45,17 @@ class CarMediaStatus(
     private fun start() {
         if (running) return
         running = true
+        // wifihold-4: Android Auto sends a playback status and a metadata message as soon as this
+        // channel opens, before the car hands over its screen. Send an empty track once if nothing plays.
+        Thread({
+            Thread.sleep(TICK_MS + 200)
+            if (running && sentTrack == null) {
+                runCatching {
+                    sendOnChannel(MSG_METADATA, Protobuf.stringField(1, "") + Protobuf.stringField(2, "") + Protobuf.stringField(3, ""))
+                    GearslipLog.i("media status: -> empty track (nothing playing yet), as Android Auto sends at start")
+                }
+            }
+        }, "gearslip-media-meta").apply { isDaemon = true; start() }
         Thread({
             while (running) {
                 runCatching { tick() }.onFailure { GearslipLog.w("media status: ${it.message}") }

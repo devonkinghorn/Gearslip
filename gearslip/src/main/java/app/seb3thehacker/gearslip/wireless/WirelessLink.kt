@@ -493,13 +493,28 @@ object WirelessLink {
                 // The phone's main Wi-Fi on the car's network wins: that is how Android Auto itself
                 // connects, and a Pixel 6 passed pings but no TCP over the side connection Android
                 // opens for Gearslip's request.
+                // wifihold-4: the car's own network goes first. Another network in the same /24 is
+                // only a guess that it's the car (a home router on 192.168.1.x looks the same), so it
+                // gets every other try as a fallback. A 2019 GM truck in a driveway with home Wi-Fi on
+                // 192.168.1.x failed all 12 tries with EHOSTUNREACH from the home address while the
+                // car's port probed open over the car's own network. (Ported from AA Recorder 0.1.2.)
                 val main = mainOnCarNetwork(context, ip, net)
-                if (main != null && attempt == 0) log.i("TCP: the phone's main Wi-Fi is on the car's network, using it")
-                val socket = when {
-                    main != null -> main.socketFactory.createSocket()
-                    lostNetwork == net || bindRefused -> Socket()
-                    else -> net.socketFactory.createSocket()
+                if (main != null && attempt == 0) {
+                    log.i("TCP: another network ($main) is also on ${ip.substringBeforeLast('.')}.x - maybe home Wi-Fi; using the car's own network first, that one every other try")
                 }
+                val carUsable = lostNetwork != net && !bindRefused
+                val useMain = main != null && (!carUsable || attempt % 2 == 1)
+                val route = when {
+                    useMain -> "the other ${ip.substringBeforeLast('.')}.x network $main"
+                    carUsable -> "the car's network $net"
+                    else -> "the phone's default route"
+                }
+                val socket = when {
+                    useMain -> main!!.socketFactory.createSocket()
+                    carUsable -> net.socketFactory.createSocket()
+                    else -> Socket()
+                }
+                log.i("TCP: try ${attempt + 1} via $route")
                 socket.tcpNoDelay = true
                 socket.connect(InetSocketAddress(ip, port), 5_000)
                 tcp = socket
@@ -514,7 +529,7 @@ object WirelessLink {
                 return
             } catch (e: Exception) {
                 last = e
-                log.w("TCP: try ${attempt + 1} to $ip:$port failed: ${e.message}")
+                log.w("TCP: try ${attempt + 1}/$TCP_TRIES to $ip:$port failed: ${e.javaClass.simpleName}: ${e.message}")
                 if (!bindRefused && e.message?.contains("EPERM") == true) {
                     bindRefused = true
                     log.i("TCP: Android won't let Gearslip use the car's network directly; trying the phone's ordinary route")

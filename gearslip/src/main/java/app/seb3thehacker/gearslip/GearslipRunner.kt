@@ -74,6 +74,17 @@ class GearslipRunner(
     @Volatile private var carGear: Int? = null
     /** Set once the phone has asked for the car's screen; the focus timer works from it. */
     @Volatile private var videoFocusAskedAt = 0L
+    @Volatile private var phoneStatusChannelId = -1
+    /** True once Start has gone out: the encoder runs from Config on, but nothing is sent before Start. */
+    @Volatile private var streamLive = false
+    /** Drop frames until a keyframe after (re)starting, so the car's decoder starts on an IDR. */
+    @Volatile private var needKeyframe = true
+    @Volatile private var streamStartedAt = 0L
+    @Volatile private var videoStartedAt = 0L
+    @Volatile private var framesHeldBeforeStart = 0
+    @Volatile private var lastSyncAskAt = 0L
+    /** Times we asked for the screen back after the car took it unasked early on. */
+    @Volatile private var reclaimAttempts = 0
     /** A VideoFocusNotification that arrived before Config, applied once Config picks the resolution. */
     @Volatile private var pendingFocusMode: Int? = null
     @Volatile private var focusRequestSent = false
@@ -243,6 +254,8 @@ class GearslipRunner(
                 CarBluetooth.onMessage(messageId, body)
             } else if (frame.channel == vendorChannelId) {
                 onVendorMessage(messageId, body)
+            } else if (frame.channel == phoneStatusChannelId) {
+                onPhoneStatusMessage(messageId, body)
             } else if (frame.channel == CarMic.current?.channelId) {
                 CarMic.current?.onMessage(messageId, body)
             } else if (frame.channel == audioLink?.channelId) {
@@ -270,7 +283,11 @@ class GearslipRunner(
             MSG_SERVICE_DISCOVERY_RESPONSE -> onServiceDiscoveryResponse(body)
             MSG_PING_REQUEST -> onPingRequest(body)
             MSG_BYEBYE_REQUEST -> onByeByeRequest(body)
-            AudioLink.MSG_FOCUS_RESPONSE -> audioLink?.onFocus(Protobuf.readInt32Field(body, 1) ?: 0)
+            AudioLink.MSG_FOCUS_RESPONSE -> {
+                val state = Protobuf.readInt32Field(body, 1) ?: 0
+                val link = audioLink
+                if (link == null) log.i("<- AudioFocusResponse state=$state (no media sink)") else link.onFocusAnswer(state)
+            }
             else -> log.i("unhandled control message id=$messageId (${body.size} bytes) - continuing")
         }
     }
@@ -500,7 +517,15 @@ class GearslipRunner(
         startMediaStatusChannel(serviceDiscoveryResponse)
         startClusterNavChannel(serviceDiscoveryResponse)
         startBluetooth(serviceDiscoveryResponse)
+        startPhoneStatusChannel(serviceDiscoveryResponse)
         startVendorChannel(serviceDiscoveryResponse)
+        // wifihold-4: Android Auto's opening moves before the car hands over its screen: audio
+        // focus (RELEASE, then GAIN) on the control channel, then the car answers GAIN and, about
+        // 1.5 s after setup, grants video focus unasked. Gearslip asked for neither and the car
+        // never granted video on its own.
+        send(AudioLink.MSG_FOCUS_REQUEST, Protobuf.varintField(1, AUDIO_FOCUS_RELEASE.toLong()), encrypted = true)
+        send(AudioLink.MSG_FOCUS_REQUEST, Protobuf.varintField(1, AUDIO_FOCUS_GAIN.toLong()), encrypted = true)
+        log.i("-> AudioFocusRequest(RELEASE), AudioFocusRequest(GAIN) at session start, as Android Auto does")
 
         val input = ServiceDiscovery.findInputService(serviceDiscoveryResponse, video.displayId)
         if (input == null) {
@@ -638,6 +663,32 @@ class GearslipRunner(
             open = { openChannel(bluetooth.serviceId) },
             send = { id, body -> send(id, body, encrypted = true, channel = bluetooth.serviceId) },
         )
+        CarBluetooth.openAtSessionStart()
+    }
+
+    /** wifihold-4: the phone status channel, opened as Android Auto does, with "no calls, signal 0". */
+    private fun startPhoneStatusChannel(serviceDiscoveryResponse: ByteArray) {
+        val channel = ServiceDiscovery.findPhoneStatusChannel(serviceDiscoveryResponse) ?: run {
+            log.i("no phone status channel")
+            return
+        }
+        phoneStatusChannelId = channel
+        log.i("phone status channel: $channel")
+        openChannel(channel)
+    }
+
+    private fun onPhoneStatusMessage(messageId: Int, body: ByteArray) {
+        if (messageId == MSG_CHANNEL_OPEN_RESPONSE) {
+            val status = Protobuf.readInt32Field(body, 1) ?: 0
+            log.i("<- ChannelOpenResponse (phone status): status=$status")
+            if (status == 0) {
+                // PhoneStatus { repeated Call calls = 1; optional uint32 signal_strength = 2; } - AA sent 10 00.
+                send(MSG_PHONE_STATUS, Protobuf.varintField(2, 0L), encrypted = true, channel = phoneStatusChannelId)
+                log.i("-> PhoneStatus(no calls, signal_strength=0)")
+            }
+        } else {
+            log.i("<- phone status message id=$messageId (${body.size} bytes)")
+        }
     }
 
     /** Turn-by-turn for the instrument cluster: the next turn, its road, and how far. */
@@ -772,6 +823,7 @@ class GearslipRunner(
             videoStarted = true
         }
         CarFocus.request = ::requestNativeFocus
+        videoStartedAt = System.currentTimeMillis()
         SessionReport.videoStart(how)
         if (how.startsWith("started without")) log.w("video: $how") else log.i("PHASE A COMPLETE - video focus granted; starting video source")
         startVideoSource()
@@ -1013,6 +1065,7 @@ class GearslipRunner(
                     // Android Auto doesn't ask: it waits for the car's unsolicited
                     // VideoFocusNotification (the GM unit sent one ~1.5 s after setup). Do the same,
                     // and only ask if none has come after VIDEO_FOCUS_UNSOLICITED_WAIT_MS.
+                    prepareVideoSource()
                     if (pendingFocusMode != null) {
                         log.i("the car already granted video focus before Config - starting now")
                         onVideoFocus(pendingFocusMode!!)
@@ -1035,7 +1088,7 @@ class GearslipRunner(
                     pendingFocusMode = mode
                     log.i("video focus came before Config - holding it until Config")
                 } else {
-                    onVideoFocus(mode)
+                    onVideoFocus(mode, Wire.varint(fields, 2) == 1L)
                 }
             }
 
@@ -1088,8 +1141,37 @@ class GearslipRunner(
         return wide.minByOrNull(::pixels) ?: known.maxByOrNull(::pixels)
     }
 
+    /**
+     * wifihold-4: Start, then the codec config and an IDR straight away. The encoder already runs
+     * (see [prepareVideoSource]); on USB it took 550 ms to start after Start, and the 2019 GM unit
+     * took its screen back 555 ms after Start, before any CodecConfig had arrived. Android Auto
+     * sends the codec config and IDR within ~600 ms of Start, from an encoder that is already up.
+     */
     private fun startVideoSource() {
-        lastKeyframeSentAt = System.currentTimeMillis() // frame #1 is always a keyframe
+        if (videoSource == null) prepareVideoSource()
+        val index = selectedConfigIndex ?: 0
+        val config = videoConfigs.getOrNull(index) ?: return
+        val start = Protobuf.varintField(1, SESSION_ID.toLong()) +
+            Protobuf.varintField(2, index.toLong())
+        needKeyframe = true
+        lastKeyframeSentAt = System.currentTimeMillis()
+        send(MSG_MEDIA_START, start, encrypted = true, channel = videoChannelId)
+        streamStartedAt = System.currentTimeMillis()
+        streamLive = true
+        log.i("-> Start(session_id=$SESSION_ID, configuration_index=$index -> $config); encoder ${if (videoSource != null) "already running" else "NOT running"}, $framesHeldBeforeStart frames held back before Start")
+        val csd = lastCodecConfig
+        if (csd != null) {
+            send(MSG_MEDIA_CODEC_CONFIG, csd, encrypted = true, channel = videoChannelId)
+            log.i("-> CodecConfig (${csd.size} bytes SPS/PPS) right after Start")
+        } else {
+            log.w("no codec config from the encoder yet - it goes out as soon as there is one")
+        }
+        videoSource?.requestSyncFrame()
+    }
+
+    /** Starts the encoder (and the car UI drawing into it) as soon as Config picks a resolution. */
+    private fun prepareVideoSource() {
+        if (videoSource != null) return
         val index = selectedConfigIndex ?: 0
         val config = videoConfigs.getOrNull(index)
         if (config == null) {
@@ -1101,11 +1183,7 @@ class GearslipRunner(
             return
         }
         config.visibleSize()?.let { (w, h) -> SessionReport.carScreen("${w}x$h", config.density) }
-
-        val start = Protobuf.varintField(1, SESSION_ID.toLong()) +
-            Protobuf.varintField(2, index.toLong())
-        send(MSG_MEDIA_START, start, encrypted = true, channel = videoChannelId)
-        log.i("-> Start(session_id=$SESSION_ID, configuration_index=$index -> $config)")
+        log.i("pre-starting the encoder for $config so CodecConfig and an IDR are ready when the car takes video")
         // The car crops its margins off the frame, so keep the UI out of them unless a vehicle
         // profile has its own tuned insets.
         if (vehicleProfile?.insets.let { it == null || it == Insets.NONE }) {
@@ -1124,12 +1202,29 @@ class GearslipRunner(
             wireless = wireless,
             onCodecConfig = { csd ->
                 lastCodecConfig = csd
-                send(MSG_MEDIA_CODEC_CONFIG, csd, encrypted = true, channel = videoChannelId)
-                log.i("-> CodecConfig (${csd.size} bytes SPS/PPS)")
+                if (streamLive) {
+                    send(MSG_MEDIA_CODEC_CONFIG, csd, encrypted = true, channel = videoChannelId)
+                    log.i("-> CodecConfig (${csd.size} bytes SPS/PPS) ${System.currentTimeMillis() - streamStartedAt}ms after Start")
+                } else {
+                    log.i("encoder codec config ready (${csd.size} bytes SPS/PPS), held until Start")
+                }
                 log.hex("   csd", csd, limit = 64)
             },
             onFrame = { data, presentationTimeUs, keyFrame ->
-                sendVideoFrame(data, presentationTimeUs, keyFrame)
+                when {
+                    !streamLive -> framesHeldBeforeStart++
+                    needKeyframe && !keyFrame -> {
+                        val now = System.currentTimeMillis()
+                        if (now - lastSyncAskAt > 150) { lastSyncAskAt = now; videoSource?.requestSyncFrame() }
+                    }
+                    else -> {
+                        if (needKeyframe) {
+                            needKeyframe = false
+                            log.i("-> first IDR ${System.currentTimeMillis() - streamStartedAt}ms after Start (${data.size} bytes)")
+                        }
+                        sendVideoFrame(data, presentationTimeUs, keyFrame)
+                    }
+                }
             },
         ).also { source ->
             runCatching {
@@ -1217,7 +1312,7 @@ class GearslipRunner(
      * screen nothing is sent, and on return the stream restarts from the codec config and a fresh
      * keyframe, since the car's decoder may have been reset in between.
      */
-    private fun onVideoFocus(mode: Int) {
+    private fun onVideoFocus(mode: Int, unsolicited: Boolean = false) {
         val projected = mode == VIDEO_FOCUS_PROJECTED || mode == VIDEO_FOCUS_PROJECTED_NO_INPUT
         if (!videoStarted) {
             // The head unit repeats this while it waits for frames; only start once.
@@ -1229,7 +1324,36 @@ class GearslipRunner(
             )
             return
         }
+        // wifihold-4: the 2019 GM unit took its screen back unasked (mode=2 unsolicited=1) 555 ms
+        // after Start, before it had any video. Early on, that's not the driver choosing the car's
+        // screen: keep the encoder and the stream going and ask for PROJECTED again after
+        // RECLAIM_DELAY_MS, up to RECLAIM_TRIES times. Later, or after that, it's honoured as before.
+        if (!projected && unsolicited && videoProjected && reclaimAttempts < RECLAIM_TRIES &&
+            (acksSeen == 0 || System.currentTimeMillis() - videoStartedAt < RECLAIM_WINDOW_MS)
+        ) {
+            reclaimAttempts++
+            val n = reclaimAttempts
+            log.w("the car took its screen back unasked ${System.currentTimeMillis() - streamStartedAt}ms after Start (frames sent=$framesSent, acks=$acksSeen) - keeping the stream up, asking for it again in ${RECLAIM_DELAY_MS}ms (attempt $n/$RECLAIM_TRIES)")
+            Thread({
+                try {
+                    Thread.sleep(RECLAIM_DELAY_MS)
+                    if (!running || !videoProjected) return@Thread
+                    log.i("-> VideoFocusRequest(PROJECTED) to take the screen back (attempt $n/$RECLAIM_TRIES)")
+                    sendVideoFocusRequest()
+                } catch (_: InterruptedException) {
+                }
+            }, "gearslip-video-reclaim").apply { isDaemon = true; start() }
+            return
+        }
+        if (projected && videoProjected && reclaimAttempts > 0) {
+            log.i("the car granted the screen again after $reclaimAttempts reclaim attempt(s) - resending CodecConfig and an IDR")
+            lastCodecConfig?.let { send(MSG_MEDIA_CODEC_CONFIG, it, encrypted = true, channel = videoChannelId) }
+            needKeyframe = true
+            videoSource?.requestSyncFrame()
+            return
+        }
         if (projected == videoProjected) return
+        if (!projected && reclaimAttempts >= RECLAIM_TRIES) log.w("the car kept its own screen after $RECLAIM_TRIES requests - stopping video as before")
         videoProjected = projected
         CarFocus.set(projected)
         if (projected) {
@@ -1244,6 +1368,7 @@ class GearslipRunner(
             send(MSG_MEDIA_START, start, encrypted = true, channel = videoChannelId)
             log.i("-> Start(session_id=$SESSION_ID)")
             lastCodecConfig?.let { send(MSG_MEDIA_CODEC_CONFIG, it, encrypted = true, channel = videoChannelId) }
+            needKeyframe = true
             videoSource?.requestSyncFrame()
         } else {
             // A phone ends the stream when the car takes its screen. LIVI switches on the focus
@@ -1499,6 +1624,12 @@ class GearslipRunner(
         private const val GEAR_REVERSE = 102
         private const val VIDEO_FOCUS_RETRY_MS = 1_000L
         private const val VIDEO_FOCUS_UNSOLICITED_WAIT_MS = 2_500L
+        private const val RECLAIM_DELAY_MS = 1_000L
+        private const val RECLAIM_TRIES = 3
+        private const val RECLAIM_WINDOW_MS = 15_000L
+        private const val AUDIO_FOCUS_GAIN = 1
+        private const val AUDIO_FOCUS_RELEASE = 4
+        const val MSG_PHONE_STATUS = 32769
         private const val VIDEO_FOCUS_GIVE_UP_MS = 5_000L
         private const val SENSOR_LOG_EVERY_MS = 10_000L
 

@@ -38,7 +38,7 @@ android {
         applicationId = "app.seb3thehacker.gearslip"
         minSdk = 31
         targetSdk = 37
-        versionCode = 18 // devonkinghorn fork: above devfix-8 (15), wifihold-1 (16), wifihold-2 (17)
+        versionCode = 19 // devonkinghorn fork: above devfix-8 (15), wifihold-1..3 (16-18)
         // -PgearslipVersionName=0.1.99-test makes a build that thinks it's older, to try the updater.
         versionName = project.findProperty("gearslipVersionName")?.toString() ?: "0.3.01-alpha"
         manifestPlaceholders["appLabel"] = "Gearslip"
